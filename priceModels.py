@@ -112,16 +112,38 @@ def test_lognormality(data):
 # ---------- Quadrature utilities ----------
 # Simpson quadrature to compute P_j's, fixed-step RK4 tau, complex128, batched over phi, 1<= j<= 2
 
-def simpson_weights(n):
+# def simpson_weights(n):
+#     """
+#     Composite Simpson weights for n nodes (n must be odd).
+#     Returns array of shape (n,), to be scaled by step/3.
+#     """
+#     if n % 2 == 0:
+#         raise ValueError("Simpson requires odd number of nodes.")
+#     w = np.ones(n, dtype=np.float64)
+#     w[1:-1:2] = 4.0
+#     w[2:-2:2] = 2.0
+#     return w
+
+# def phi_grid(phi_max, n_phi, eps0=1e-6):
+#     """Uniform φ-grid on [0, phi_max], with φ[0]=eps0 to avoid division by zero."""
+#     phi = np.linspace(0.0, phi_max, n_phi, dtype=np.float64)
+#     phi[0] = eps0
+#     return phi
+
+# ---------- Trapezoid (Boyarchenko–Levendorskiĭ) utilities ----------
+# Trapezoid quadrature to compute P_j's, fixed uniform φ-grid, batched over φ, j=1,2
+
+def trap_weights(n, simplified=True):
     """
-    Composite Simpson weights for n nodes (n must be odd).
-    Returns array of shape (n,), to be scaled by step/3.
+    Composite trapezoid weights for n nodes (uniform grid).
+    If simplified=True, apply 1/2 only at the first node (φ=0) as in (2.31);
+    otherwise use the standard 1/2 at both ends.
+    Returns an array of shape (n,) to be scaled by the step size h.
     """
-    if n % 2 == 0:
-        raise ValueError("Simpson requires odd number of nodes.")
     w = np.ones(n, dtype=np.float64)
-    w[1:-1:2] = 4.0
-    w[2:-2:2] = 2.0
+    w[0] = 0.5
+    if simplified:
+        w[-1] = 0.5
     return w
 
 def phi_grid(phi_max, n_phi, eps0=1e-6):
@@ -129,6 +151,7 @@ def phi_grid(phi_max, n_phi, eps0=1e-6):
     phi = np.linspace(0.0, phi_max, n_phi, dtype=np.float64)
     phi[0] = eps0
     return phi
+
 
 # ---------- ODE system & integrator ----------
 # Coefficients C,D,E,F,G,H via RK4 integration of ODE system Eq. (4) of Lin-Lin-He paper
@@ -240,16 +263,34 @@ def build_transform_vec(coeffs, S_vec, v_vec, theta_vec, phi):
     quad = (C + D*v2 + E*v*th + F*th*th + G*th + H*v + 1j*PHI*xv)  # (n_phi,2,N)
     return np.exp(quad)
 
+# def compute_P_vec(f, K, phi, w):
+#     """
+#     Vectorized Simpson integration for P1,P2.
+#     f: (n_phi, 2, N)  -> returns P1,P2 with shape (N,)
+#     """
+#     lnK = np.log(K)
+#     kernel = np.exp(-1j*phi*lnK) / (1j*phi)      # (n_phi,)
+#     integrand = np.real(kernel[:, None, None] * f)  # (n_phi,2,N)
+#     P = 0.5 + (1/np.pi) * np.tensordot(w, integrand, axes=(0,0))  # (2,N)
+#     return np.real(P[0, :]), np.real(P[1, :])
+
 def compute_P_vec(f, K, phi, w):
     """
-    Vectorized Simpson integration for P1,P2.
-    f: (n_phi, 2, N)  -> returns P1,P2 with shape (N,)
+    Vectorized trapezoid integration for P1, P2 using precomputed f(φ).
+    f : (n_phi, 2, N) complex   — columns j=0,1 correspond to P1, P2; N strikes/points batched
+    K : float or array (N,)     — strike(s)
+    phi : (n_phi,)              — grid
+    w : (n_phi,)                — weights already scaled by step h
+
+    Returns (P1, P2) each of shape (N,)
     """
     lnK = np.log(K)
-    kernel = np.exp(-1j*phi*lnK) / (1j*phi)      # (n_phi,)
-    integrand = np.real(kernel[:, None, None] * f)  # (n_phi,2,N)
-    P = 0.5 + (1/np.pi) * np.tensordot(w, integrand, axes=(0,0))  # (2,N)
+    kernel = np.exp(-1j * phi * lnK) / (1j * phi)         # (n_phi,)
+    integrand = np.real(kernel[:, None, None] * f)        # (n_phi, 2, N)
+    P = 0.5 + (1.0/np.pi) * np.tensordot(w, integrand, axes=(0, 0))  # (2, N)
     return np.real(P[0, :]), np.real(P[1, :])
+
+
 
 # ---------- Precompute holder ----------
 
@@ -321,42 +362,62 @@ class ImprovedSteinStein:
                 "S": np.concatenate([S0_, S], axis=1)}
 
     # ---------- European call pricing (scalar, with optional precompute) ----------
-    def llh_precompute_tau(self, tau, phi_max, n_phi, n_steps_ode, eps0=1e-6) -> LLHPrecompute:
-        """Precompute phi-grid, Simpson weights and RK4 coeffs at fixed tau.
+    # def llh_precompute_tau(self, tau, phi_max, n_phi, n_steps_ode, eps0=1e-6) -> LLHPrecompute:  # using Simpson's quadrature
+    #     """Precompute phi-grid, Simpson weights and RK4 coeffs at fixed tau.
 
-        Parameters:
-          tau         : time to maturity
-          phi_max     : maximum φ value for integration
-          n_phi       : number of φ nodes (must be odd)
-          n_steps_ode : number of RK4 steps for ODE integration
-          eps0        : small value to avoid division by zero at φ=0
+    #     Parameters:
+    #       tau         : time to maturity
+    #       phi_max     : maximum φ value for integration
+    #       n_phi       : number of φ nodes (must be odd)
+    #       n_steps_ode : number of RK4 steps for ODE integration
+    #       eps0        : small value to avoid division by zero at φ=0
+    #     """
+    #     if n_phi % 2 == 0:
+    #         raise ValueError("n_phi must be odd. Simpson requires odd number of nodes.")
+    #     phi = phi_grid(phi_max, n_phi, eps0)
+    #     w = simpson_weights(n_phi) * ((phi_max)/(n_phi-1)/3.0)
+    #     rhs = rhs_factory(phi, self.r, self.kappa, self.nu, self.lam, self.eta, self.rho)
+    #     coeffs = rk4_integrate(rhs, tau, n_steps_ode, n_phi)
+    #     return LLHPrecompute(tau=float(tau), phi=phi, w=w, coeffs=coeffs, n_phi=n_phi)
+
+
+    def llh_precompute_tau(self, tau, phi_max, n_phi, n_steps_ode, eps0=1e-6) -> LLHPrecompute:
         """
-        if n_phi % 2 == 0:
-            raise ValueError("n_phi must be odd. Simpson requires odd number of nodes.")
+        Precompute φ-grid, trapezoid weights, and RK4 ODE coefficients at fixed τ.
+
+        Parameters
+        ----------
+        tau         : float
+            Time to maturity.
+        phi_max     : float
+            Maximum φ value for integration.
+        n_phi       : int
+            Number of φ nodes (uniform grid).
+        n_steps_ode : int
+            Number of RK4 steps for the ODE integration in τ.
+        eps0        : float, optional
+            Small offset to avoid division by zero at φ=0.
+
+        Notes
+        -----
+        Uses the simplified trapezoid rule per Boyarchenko–Levendorskiĭ (Eq. 2.31):
+            w₀ = 1/2,  w_k = 1  for k>0.
+        The weights are scaled by the uniform step size Δφ = φ_max / (n_phi – 1).
+        """
+        # Uniform φ-grid on [0, φ_max], φ₀ = eps0 to avoid 1/0
         phi = phi_grid(phi_max, n_phi, eps0)
-        w = simpson_weights(n_phi) * ((phi_max)/(n_phi-1)/3.0)
+
+        # Trapezoid weights (half at φ=0 only) scaled by Δφ
+        dphi = phi_max / (n_phi - 1)
+        w = dphi * trap_weights(n_phi, simplified=True)
+
+        # Build RHS factory and integrate the ODE system for coefficients
         rhs = rhs_factory(phi, self.r, self.kappa, self.nu, self.lam, self.eta, self.rho)
         coeffs = rk4_integrate(rhs, tau, n_steps_ode, n_phi)
+
+        # Return precomputed structure
         return LLHPrecompute(tau=float(tau), phi=phi, w=w, coeffs=coeffs, n_phi=n_phi)
 
-    # def price_call_llh_scalar(self, S, K, tau, vol, theta,
-    #                    phi_max=200.0, n_phi=1025, n_steps=252, eps0=1e-6, pre=None): 
-    #     """European call under Lin–Lin–He (scalar). If `pre` is provided, reuse its τ-setup."""
-    #     if pre is None:
-    #         if n_phi%2==0: 
-    #             raise ValueError("n_phi must be odd.\n Simpson requires odd number of nodes.")
-    #         phi = phi_grid(phi_max,n_phi,eps0)
-    #         w = simpson_weights(n_phi)*((phi_max)/(n_phi-1)/3.0)
-    #         rhs = rhs_factory(phi,self.r,self.kappa,self.nu,self.lam,self.eta,self.rho)
-    #         coeffs = rk4_integrate(rhs,tau,n_steps,n_phi)
-    #     else:
-    #         phi = pre.phi
-    #         w = pre.w
-    #         coeffs = pre.coeffs
-
-    #     f = build_transform(coeffs,S,vol,theta,phi)
-    #     P1,P2 = compute_P(f,K,phi,w)
-    #     return float(np.real(S*P1 - K*np.exp(-self.r*tau)*P2))
 
     # ---------- European call pricing (vectorized over paths for fixed τ) ----------
 
@@ -392,7 +453,7 @@ class ImprovedSteinStein:
         disc = np.exp(-self.r * tau)
         return np.real(S * P1 - K * disc * P2)
 
-        # ---------- European put pricing (vectorized over paths for fixed τ) ----------
+    # ---------- European put pricing (vectorized over paths for fixed τ) ----------
     def price_put_llh(self, S, K, tau, vol, theta, phi_max, n_phi, n_steps_ode, pre=None, eps0=1e-6):
         """
         Vectorized European put prices under Lin–Lin–He for a fixed tau (via put-call parity).
