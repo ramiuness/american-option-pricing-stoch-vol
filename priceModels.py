@@ -476,7 +476,6 @@ class ImprovedSteinStein:
         return call - S + K * np.exp(-self.r * tau)
     
     
-
 def compare_european_prices(model, S0=100.0, K=90.0, tau=1.0,
                            n_steps_mc=252, n_paths=50000,
                            phi_max=300.0, n_phi=513, n_steps_ode=128):
