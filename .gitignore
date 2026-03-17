@@ -1,0 +1,16 @@
+# Claude Code internal files
+CLAUDE.md
+.claude/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# OS
+.DS_Store
+.Rhistory
