@@ -53,10 +53,14 @@ def sigma_hat_from_components(
     a1 = np.exp(-kappa * dt)
     term_W2  = causal_exp_conv(W2, a1)
     term_Bm1 = causal_exp_conv(B - 1.0, a1)
+    if kappa != 0:
+        lam_drift = lam * idx * dt + lam * np.expm1(-kappa * idx * dt) / kappa
+    else:
+        lam_drift = np.zeros_like(idx, dtype=float)
     sigma_hat = (
-        exp_kdt_idx * (sigma0 + lam - theta0)
+        exp_kdt_idx * (sigma0 - theta0)
         + theta0
-        + lam * (idx * dt - 1.0)
+        + lam_drift
         + nu * W2
         - (nu * kappa * dt) * term_W2
         + (eta * kappa * dt) * term_Bm1
@@ -421,7 +425,7 @@ class ImprovedSteinStein:
 
     # ---------- European call pricing (vectorized over paths for fixed τ) ----------
 
-    def price_call_llh(self, S, K, tau, vol, theta, phi_max, n_phi, n_steps_ode, pre=None, eps0=1e-6):
+    def price_call_llh(self, S, K, tau, vol, theta, phi_max=300.0, n_phi=513, n_steps_ode=128, pre=None, eps0=1e-6):
         """
         Vectorized European call prices under Lin–Lin–He for a fixed tau.
 
