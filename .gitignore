@@ -1,3 +1,6 @@
+# Original (pre-fix) pricer — kept for reference only
+src/amOptPricer_0.py
+
 # Claude Code internal files
 CLAUDE.md
 .claude/

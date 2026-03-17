@@ -93,10 +93,14 @@ def _theta_lr_grid(B, theta0, lam, eta, dt, n_steps, n_paths):
     Build long-run mean process θ_t on the simulation grid.
     Returns (n_paths, n_steps+1); col 0 = θ0; for j>=1:
       θ[:, j] = θ0 + lam*(j*dt) + eta*(B[:, j-1] - 1).
+
+    Note: B has shape (n_paths, n_steps), so broadcasting B to theta[:, 1:]
+    correctly implements theta[:, j] = ... + eta*(B[:, j-1] - 1) for j=1..n_steps.
     """
     theta = np.empty((n_paths, n_steps + 1), dtype=float)
     theta[:, 0] = float(theta0)
     t_index = np.arange(1, n_steps + 1, dtype=float) * dt
+    # This broadcast correctly aligns: theta[:, j] uses B[:, j-1]
     theta[:, 1:] = theta0 + lam * t_index[None, :] + eta * (B - 1.0)
     return theta
 
@@ -187,10 +191,71 @@ def _euro_put_slice(method, model, sim_out, j, S_col, vol_col, theta_col, tau, K
 
 def price_american_put_lsm_llh(model, sim_out, K, basis_order=3,
                                use_cv=True, improved=True, ridge=0.0,
-                               euro_method='llh'):
+                               euro_method='llh',
+                               phi_max=300.0, n_phi=513, n_steps_rk4=128, eps0=1e-6):
     """
     LSM pricer for an American PUT with optional Rasmussen-style control variates.
     Dynamics: Lin–Lin–He (Improved Stein–Stein); paths come from `sim_out`.
+
+    Parameters
+    ----------
+    model : ImprovedSteinStein
+        The LLH model instance with parameters.
+    sim_out : dict
+        Simulated paths from model.simulate_prices(), contains 'S', 'sigma_hat', 'B', 'dt'.
+    K : float
+        Strike price.
+    basis_order : int, default=3
+        Order of Laguerre polynomial basis for regression.
+    use_cv : bool, default=True
+        Whether to use control variates (Rasmussen approach).
+    improved : bool, default=True
+        Whether to compute improved estimator with global control parameter.
+    ridge : float, default=0.0
+        Ridge regularization parameter for OLS regressions.
+    euro_method : {'llh', 'bs', 'mc1'}, default='llh'
+        Method for European option pricing:
+        - 'llh': Lin-Lin-He formula (accurate but slow)
+        - 'bs': Black-Scholes proxy (fast approximation)
+        - 'mc1': Same-path Monte Carlo estimate
+
+    **LLH Integration Parameters** (only used if euro_method='llh'):
+    phi_max : float, default=300.0
+        Maximum frequency for Simpson quadrature. Higher captures tail better.
+        Recommended: 200 (FAST), 300 (STANDARD), 400 (HIGH_ACCURACY).
+    n_phi : int, default=513
+        Number of quadrature points (must be odd). Error ~ O(phi_max/n_phi)^4.
+        Recommended: 257 (FAST), 513 (STANDARD), 1025 (HIGH_ACCURACY).
+    n_steps_rk4 : int, default=128
+        Number of RK4 steps for ODE integration. Error ~ O(tau/n_steps)^5.
+        Recommended: 32 (FAST), 128 (STANDARD), 256 (HIGH_ACCURACY).
+    eps0 : float, default=1e-6
+        Minimum frequency to avoid division by zero in quadrature.
+
+    Returns
+    -------
+    dict with keys:
+        'price' : float
+            American put price (LSM estimate).
+        'std_err' : float
+            Standard error of the estimate.
+        'ci_95' : tuple
+            95% confidence interval (lower, upper).
+        'n_paths' : int
+            Number of simulated paths used.
+        'price_imp' : float (if improved=True)
+            Improved estimate with global control parameter.
+        'std_err_imp' : float (if improved=True)
+            Standard error of improved estimate.
+        'ci_95_imp' : tuple (if improved=True)
+            95% CI for improved estimate.
+
+    Notes
+    -----
+    Defaults (phi_max=300, n_phi=513, n_steps_rk4=128) correspond to STANDARD preset,
+    which balances accuracy and speed. For faster testing, use FAST preset
+    (phi_max=200, n_phi=257, n_steps_rk4=32). For publication, use HIGH_ACCURACY
+    (phi_max=400, n_phi=1025, n_steps_rk4=256).
     """
     S = sim_out['S']
     sigma_hat = sim_out['sigma_hat']
@@ -212,6 +277,17 @@ def price_american_put_lsm_llh(model, sim_out, K, basis_order=3,
 
     CF_1 = CV_1 = E_1 = None
 
+    # Precompute all unique τ values (only if using LLH)
+    tau_cache = {}
+    if euro_method == 'llh':
+        for j in range(1, n_steps):
+            tauj = (n_steps - j) * dt
+            if tauj not in tau_cache:
+                tau_cache[tauj] = model.llh_precompute_tau(
+                    tauj, phi_max=phi_max, n_phi=n_phi,
+                    n_steps_ode=n_steps_rk4, eps0=eps0
+                )
+
     # Backward loop: j = N-1,...,1
     for j in range(n_steps - 1, 0, -1):
         # (i) discount one step
@@ -220,12 +296,14 @@ def price_american_put_lsm_llh(model, sim_out, K, basis_order=3,
 
         # Node data at t_j
         Sj = S[:, j]
-        volj = sigma_hat[:, j-1]     # align with S[:, j]
+        # FIX: Use sigma_hat[:, j] for forward pricing from t_j
+        # sigma_hat[:, j] is volatility for interval [t_j, t_{j+1}]
+        volj = sigma_hat[:, j]  # Was: sigma_hat[:, j-1] (incorrect - off by one)
         thetaj = theta_lr[:, j]
         tauj = (n_steps - j) * dt
 
-        # (A) τ-precompute only if using LLH; otherwise avoid overhead
-        pre_j = model.llh_precompute_tau(tauj) if euro_method == 'llh' else None
+        # (A) Use cached τ-precompute if using LLH; otherwise None
+        pre_j = tau_cache.get(tauj) if euro_method == 'llh' else None
 
         # (B) E_j: European PUT via selected method (vectorized)
         Ej = _euro_put_slice(euro_method, model, sim_out, j, Sj, volj, thetaj, tauj, K, llh_pre=pre_j)
