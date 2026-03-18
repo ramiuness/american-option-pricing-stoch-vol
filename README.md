@@ -85,11 +85,7 @@ The Longstaff-Schwartz algorithm uses Laguerre polynomial regression to estimate
 
 ### Ansatz Non-Closure
 
-The covariance matrix of (σ, θ) is **quadratic** in the state, not affine. This means the exponential-quadratic ansatz used to derive the characteristic function ODEs is mathematically unjustified. `notebooks/char_func_symbolic.ipynb` proves this symbolically: the residual P = L[y]/y has total degree **4** in (σ, θ) for the full LLH PDE, collapsing to degree 2 only in the Stein-Stein limit. The ODE system from LLH is therefore an approximation.
-
-### Exact Alternative (Planned)
-
-Conditioning on the GBM driver filtration ℱ^W renders θ(t) deterministic, reducing the characteristic function PDE to a 1D problem with an exact quadratic ansatz. The outer expectation over ℱ^W is Gaussian and has a closed form. This approach is expected to eliminate the residual 3–5% bias.
+The covariance matrix of (σ, θ) is **quadratic** in the state, not affine. This means the exponential-quadratic ansatz used to derive the characteristic function ODEs in Lin, Lin, He paper is mathematically unjustified. `notebooks/char_func_symbolic.ipynb` proves this symbolically: the residual P = L[y]/y has total degree **4** in (σ, θ) for the full LLH PDE, collapsing to degree 2 only in the Stein-Stein limit. The ODE system from LLH is therefore an approximation.
 
 ---
 
