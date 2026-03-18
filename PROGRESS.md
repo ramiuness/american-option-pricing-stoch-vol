@@ -102,54 +102,78 @@ Observed bias before fixes (old defaults `phi_max=200, n_phi=257, n_steps_ode=64
 
 ---
 
+## Phase 3: Theoretical Analysis — Ansatz Non-Closure + Conditioning on B (in progress)
+
+### Completed deliverables (2026-03-18)
+
+#### `notebooks/char_func_symbolic.ipynb` (new) ✅
+
+Symbolic proof (SymPy) — §1 only: non-closure of the quadratic-exponential ansatz for the full LLH PDE.
+
+- Constructs `P = L[y]/y` symbolically using the exact PDE (21) with θ-diffusion
+  coefficient `½(η−θ₀−λt+θ)²` (quadratic in θ)
+- P displayed in decreasing graded lex order (θ⁴ term first); `sp.Poly(P, σ, θ).total_degree()` = **4**
+- Coefficient of `θ⁴` = `½Γ₂₂²` → forces `Γ₂₂=0` → forces `Γ₁₂=0` → `σθ` cost `-s₂` unbalanced
+- Same decreasing-order display applied to P after each substitution (Γ₂₂=0, then Γ₁₂=0)
+- Formal impossibility table; confirms ODE system in LLH paper is an **approximation**
+
+The exact alternative (conditioning on ℱ^W) is planned in `notebooks/conditioning_on_B.ipynb` (not yet created).
+
+#### `notebooks/conditioning_on_B.ipynb` — **planned, not yet created**
+
+Will contain symbolic derivation (SymPy) — exact 1D reduction of the LLH characteristic function by conditioning on ℱ^W.
+
+**§1 — 1D closure verification**
+- Conditions on the GBM driver filtration: `θ(u)=θ₀+λu+η(B_u−1)` becomes deterministic
+- 1D Feynman-Kac PDE for σ (time-inhomogeneous O-U): verifies degree = 2 regardless of `θ(t)`
+- P1D displayed in decreasing σ order (σ² first)
+- Extracts three ODEs: `Ḋ` (Riccati, θ-free — same as S&Z), `Ḃ_coef` (linear, θ(t) enters),
+  `Ċ` (quadrature, θ(t) enters)
+
+**§2 — Gaussian outer expectation**
+- Decomposes C: deterministic + `η∫f(u)B_u du`; shows the latter is Gaussian → closed-form
+  outer expectation via `E[exp(M)] = exp(½Var(M))`
+- Derives `Var(M) = η² ∫∫ f(u)f(v) Cov(B_u,B_v) du dv` with `Cov(B_u,B_v)=e^{min(u,v)−(u+v)/2}−1`
+- Summary table: LLH approximation vs S&Z exact (SS limit) vs conditioning-on-B exact
+
+#### `reports/conditioning_derivation.tex` — **planned, not yet created**
+
+Will be a standalone LaTeX document (amsmath/amssymb/amsthm/geometry). Six sections:
+1. Introduction — two approaches, why ansatz fails
+2. Model Setup — LLH SDEs, θ solution, characteristic-function decomposition
+3. Non-Affine Observation — Proposition + proof (citing symbolic notebook)
+4. S&Z Limit — exact ODEs (3 equations) and cosh/sinh structure
+5. Conditioning on B — full derivation: formal conditioning, 1D PDE, quadratic ansatz
+   → 3 ODEs, C decomposition, Gaussian integral → final formula (Eq. 15)
+6. Conclusion — what remains for numerical implementation
+
+#### `notebooks/european_pricing.ipynb` — §5 appended ✅
+
+New §5 "Comparison with Schöbel-Zhu (1999) Table 2 — Impact of θ₀":
+- SS-limit parameters: `r=0.0953, κ=4, ν=0.1, σ₀=0.15, τ=0.5, S=100`
+- 3 panels (D: ρ=0.5, E: ρ=0.0, F: ρ=−0.5) × 4 θ₀ values × 7 strikes
+- DataFrame output: BS / LLH / MC rows per panel
+- Remarks on stationary case, bias, correlation skew, long-run mean effect
+
+---
+
 ## Open Tasks
 
-### Immediate: Formula Fix (archive/)
+### Validation
 
-- [ ] Apply σ(t) fix to `archive/priceModels.py` (`sigma_hat_from_components`):
-  - `exp_kdt_idx * (sigma0 + lam - theta0)` → `exp_kdt_idx * (sigma0 - theta0 + lam / kappa)`
-  - `lam * (idx * dt - 1.0)` → `lam * (idx * dt - 1.0 / kappa)`
-- [x] Autonomous ODE fix — already present in `archive/priceModels.py` (no `* current_tau`)
+- [ ] Run `notebooks/char_func_symbolic.ipynb` to confirm symbolic degree = 4 and θ⁴ term visible at top of displayed P
+- [ ] Run `notebooks/conditioning_on_B.ipynb` to confirm `Poly_P1D.degree()` = 2 and Ḋ prints without θ(t) in free symbols
+- [ ] Run `notebooks/european_pricing.ipynb` §5 panels — Panel E (ρ=0, θ₀=0.2) LLH should match S&Z Table 2
+- [ ] **P_A ≥ P_E** no-arbitrage check: BS limit, SS limit, full LLH model
+- [ ] **Variance reduction**: CV run shows lower std_err than no-CV; improved estimator reduces further
 
-### Validation (run after σ(t) fix)
+### Research
 
-Work through these in order using the numbered notebooks in `notebooks/`.
-
-#### Step 1: Verify Imports
-
-```bash
-python -c "from src.models.llh_model import ImprovedSteinStein; print('OK')"
-python -c "from src.pricing.american.lsm import price_american_put_lsm_llh; print('OK')"
-python -c "from src.utils.diagnostics import compare_european_prices; print('OK')"
-```
-
-#### Step 2: Notebook 01 — LLH Simulation
-
-- [ ] **MC drift**: `E[S_T] / S₀ ≈ exp(r·T)` for T = 0.25, 1.0, 2.0 — key test for σ fix
-- [ ] **BS limit**: KS lognormality test passes (p-value > 0.05)
-- [ ] `sigma_hat` values non-negative
-- [ ] Path plots qualitatively reasonable
-
-#### Step 3: Notebook 02 — European Pricing
-
-- [ ] **BS limit**: LLH formula matches Black-Scholes (error < 1e-10)
-- [ ] **Stein-Stein limit**: LLH formula ≈ 10.77 (Stein-Stein 1991 Table 1, error < 3e-3)
-- [ ] **LLH ATM** (S=K=100, T=1): ≈ 7–8 per LLH paper Figure 2(a)
-- [ ] **European bias table**: LLH vs MC for T = 1/12, 1/4, 1/2, 1.0; K = 90, 100, 110
-- [ ] Convergence study: `n_steps_ode` ∈ {64, 128, 256, 512}; `phi_max` ∈ {200, 300, 400, 500}
-- [ ] Confirm STANDARD (`phi_max=300, n_phi=513, n_steps_ode=128`) and HIGH presets
-
-#### Step 4: Notebook 03 — American Pricing
-
-- [ ] **P_A ≥ P_E** no-arbitrage: BS limit, SS limit, full LLH model
-- [ ] **Variance reduction**: CV run shows lower std_err than no-CV run
-- [ ] **Improved estimator** (`improved=True`) reduces std_err further
-- [ ] Test with n_paths = 1000, 5000, 10000
-
-### Research (after validation)
-
-- [ ] If European bias persists: try `scipy.integrate.solve_ivp` (adaptive ODE)
-- [ ] If European bias persists: try `scipy.integrate.quad` (adaptive quadrature)
+- [ ] Implement conditioning-on-B pricing numerically in `src/priceModels.py` (replaces approximate ODE)
+  - Step 1: RK4 for `D, B_coef, C_det` with θ(t) = θ₀+λt−η (deterministic part)
+  - Step 2: 2D quadrature for `∫∫ f(u)f(v) Cov(B_u,B_v) du dv`
+  - Expected: eliminates the ~3–5% bias at τ=0.5
+- [ ] If European bias persists with current ODE: try `scipy.integrate.solve_ivp` (adaptive step)
 - [ ] Finalize STANDARD and HIGH_ACCURACY preset documentation
 
 ---
