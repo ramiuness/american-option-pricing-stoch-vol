@@ -4,6 +4,7 @@ src/amOptPricer_0.py
 # Claude Code internal files
 CLAUDE.md
 .claude/
+PROGRESS.md
 
 # Python
 __pycache__/
