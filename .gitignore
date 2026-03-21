@@ -5,6 +5,10 @@ src/amOptPricer_0.py
 CLAUDE.md
 .claude/
 PROGRESS.md
+plan_calibration.md
+
+# Demo notebook
+notebooks/demo.ipynb
 
 # Python
 __pycache__/

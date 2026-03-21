@@ -480,11 +480,11 @@ class ImprovedSteinStein:
         return call - S + K * np.exp(-self.r * tau)
     
     
-def compare_european_prices(model, S0=100.0, K=90.0, tau=1.0,
-                           n_steps_mc=252, n_paths=50000,
-                           phi_max=300.0, n_phi=513, n_steps_ode=128):
+def european_prices(model, S0=100.0, K=90.0, tau=1.0,
+                    n_steps_mc=252, n_paths=50000,
+                    phi_max=300.0, n_phi=513, n_steps_ode=128):
     """
-    Compute the prices of European call and put using the LLH formula and MC simulations.
+    Compute European call and put prices under the LLH formula and via Monte Carlo.
 
     Parameters:
       model       : ImprovedSteinStein model instance
@@ -493,27 +493,48 @@ def compare_european_prices(model, S0=100.0, K=90.0, tau=1.0,
       tau         : time to maturity
       n_steps_mc  : number of MC time discretization steps
       n_paths     : number of MC paths
-      phi_max     : maximum φ value for Simpson integration
-      n_phi       : number of φ nodes (must be odd)
+      phi_max     : maximum φ value for quadrature
+      n_phi       : number of φ nodes
       n_steps_ode : number of RK4 steps for ODE integration
-    """
 
-    # Simulate paths for MC pricing
+    Returns dict with keys:
+      llh_call, llh_put          : analytical LLH prices
+      mc_call, mc_call_ci        : MC call price and 95% CI
+      mc_put,  mc_put_ci         : MC put price and 95% CI
+    """
     res = model.simulate_prices(S0=S0, T=tau, n_steps_mc=n_steps_mc, n_paths=n_paths)
 
-    # European call price using LLH analytical formula
-    price_call = model.price_call_llh(S=S0, K=K, tau=tau,
-                                      vol=model.sigma0, theta=model.theta0,
-                                      phi_max=phi_max, n_phi=n_phi, n_steps_ode=n_steps_ode).item()
+    llh_call = model.price_call_llh(S=S0, K=K, tau=tau,
+                                    vol=model.sigma0, theta=model.theta0,
+                                    phi_max=phi_max, n_phi=n_phi, n_steps_ode=n_steps_ode).item()
+    llh_put  = model.price_put_llh(S=S0, K=K, tau=tau,
+                                   vol=model.sigma0, theta=model.theta0,
+                                   phi_max=phi_max, n_phi=n_phi, n_steps_ode=n_steps_ode).item()
 
-    # European put price using LLH analytical formula
-    price_put = model.price_put_llh(S=S0, K=K, tau=tau,
-                                     vol=model.sigma0, theta=model.theta0,
-                                     phi_max=phi_max, n_phi=n_phi, n_steps_ode=n_steps_ode).item()
+    res_mc_call = aop.price_call_mc(res['S'], K=K, T=tau, r=model.r)
+    res_mc_put  = aop.price_put_mc(res['S'],  K=K, T=tau, r=model.r)
 
-    # Monte Carlo pricing using the simulated paths
-    res_mc = aop.price_call_mc(res['S'], K=K, T=tau, r=model.r)
-    price_put_mc = res_mc.get('price') - S0 + K * np.exp(-model.r * tau)
+    return {
+        'llh_call':   llh_call,
+        'llh_put':    llh_put,
+        'mc_call':    res_mc_call['price'],
+        'mc_call_ci': res_mc_call['ci_95'],
+        'mc_put':     res_mc_put['price'],
+        'mc_put_ci':  res_mc_put['ci_95'],
+    }
 
-    print(f"European call LLH price:  {price_call},\nEuropean call MC price:  {res_mc.get('price')}, MC 95% CI: {res_mc.get('ci_95')},\nEuropean put LLH price:  {price_put},\nEuropean put MC price:  {price_put_mc}")
+
+def compare_european_prices(model, S0=100.0, K=90.0, tau=1.0,
+                            n_steps_mc=252, n_paths=50000,
+                            phi_max=300.0, n_phi=513, n_steps_ode=128):
+    """Print European prices. Thin wrapper around european_prices."""
+    r = european_prices(model, S0=S0, K=K, tau=tau,
+                        n_steps_mc=n_steps_mc, n_paths=n_paths,
+                        phi_max=phi_max, n_phi=n_phi, n_steps_ode=n_steps_ode)
+    print(
+        f"European call LLH price:  {r['llh_call']},\n"
+        f"European call MC price:   {r['mc_call']}, MC 95% CI: {r['mc_call_ci']},\n"
+        f"European put LLH price:   {r['llh_put']},\n"
+        f"European put MC price:    {r['mc_put']}, MC 95% CI: {r['mc_put_ci']}"
+    )
     

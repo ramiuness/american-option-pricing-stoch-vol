@@ -45,6 +45,26 @@ def price_call_mc(paths, K, T, r=None, seed=None):
     }
 
 
+def price_put_mc(paths, K, T, r=None):
+    """
+    Monte Carlo European put pricing.
+    K: strike
+    r: discount rate
+    Returns dict with price, std_err, ci_95, n_paths.
+    """
+    n_paths = paths.shape[0]
+    disc = np.exp(-r * T)
+    Y = disc * np.maximum(K - paths[:, -1], 0.0)
+    price = Y.mean()
+    std_err = Y.std(ddof=1) / np.sqrt(n_paths)
+    ci95 = (price - 1.96*std_err, price + 1.96*std_err)
+    return {
+        'price': price,
+        'std_err': std_err,
+        'ci_95': ci95,
+        'n_paths': n_paths
+    }
+
 
 #############################################################################
 ####################### American Put Pricer (LSM + CV) ######################

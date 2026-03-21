@@ -44,11 +44,14 @@ Reference parameters from Lin-Lin-He Table 2:
 src/
   priceModels.py        # LLH simulation + European pricing (ODE/quadrature)
   amOptPricer.py        # LSM + Rasmussen control variates (production)
+  calibrate.py          # LLH calibration to market options (DE + L-BFGS-B, CRN)
 
 notebooks/
   demo.ipynb                  # End-to-end pricing demo
   european_pricing.ipynb      # European price validation + S&Z Table 2 comparison
   char_func_symbolic.ipynb    # SymPy proof: ansatz non-closure (degree-4 argument)
+  calibration.ipynb           # Calibrate LLH to S&P 500 options + diagnostic plots
+  stylized_facts.ipynb        # Parameter impact on return distributions (5 experiments)
 
 reports/
   eur_price_llh.pdf           # Theoretical derivation of the European price formula
@@ -122,6 +125,8 @@ print(result)
 - Python 3.9+
 - NumPy, SciPy, Matplotlib
 - SymPy (for `char_func_symbolic.ipynb`)
+- yfinance (for `calibrate.py` market data fetching)
+- statsmodels (for ACF computation in `stylized_facts.ipynb`)
 
 ---
 
