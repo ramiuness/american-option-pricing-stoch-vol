@@ -47,12 +47,26 @@ def sigma_hat_from_components(
     n_steps_mc: int, dt: float, kappa: float, sigma0: float, theta0: float, lam: float,
     nu: float, eta: float, W2: np.ndarray, B: np.ndarray
 ):
-    """Compute sigma_hat's using the reported formula (15) and given inputs. Returns (n_paths, n_steps_mc)."""
-    idx = np.arange(1, n_steps_mc + 1)[None, :]
+    """Compute sigma_hat at times 0, Δt, ..., (n-1)Δt so that sigma_hat[:,j] = σ(t_j).
+
+    This ensures sigma_hat[:,j] is F_{t_j}-measurable and can be correctly paired
+    with dW1[:,j] (the increment on [t_j, t_{j+1}]) in the Euler scheme.
+
+    Returns (n_paths, n_steps_mc).
+    """
+    n_paths = W2.shape[0]
+    idx = np.arange(0, n_steps_mc)[None, :]          # j = 0, 1, ..., n-1
     exp_kdt_idx = np.exp(-kappa * idx * dt)
     a1 = np.exp(-kappa * dt)
-    term_W2  = causal_exp_conv(W2, a1)
-    term_Bm1 = causal_exp_conv(B - 1.0, a1)
+
+    # Prepend t=0 values: W²_0 = 0, B_0 - 1 = 0
+    zero_col = np.zeros((n_paths, 1))
+    W2_shifted  = np.concatenate([zero_col, W2[:, :-1]], axis=1)   # W² at times 0, Δt, ..., (n-1)Δt
+    Bm1_shifted = np.concatenate([zero_col, (B - 1.0)[:, :-1]], axis=1)  # B-1 at times 0, Δt, ..., (n-1)Δt
+
+    term_W2  = causal_exp_conv(W2_shifted, a1)
+    term_Bm1 = causal_exp_conv(Bm1_shifted, a1)
+
     if kappa != 0:
         lam_drift = lam * idx * dt + lam * np.expm1(-kappa * idx * dt) / kappa
     else:
@@ -61,7 +75,7 @@ def sigma_hat_from_components(
         exp_kdt_idx * (sigma0 - theta0)
         + theta0
         + lam_drift
-        + nu * W2
+        + nu * W2_shifted
         - (nu * kappa * dt) * term_W2
         + (eta * kappa * dt) * term_Bm1
     )
