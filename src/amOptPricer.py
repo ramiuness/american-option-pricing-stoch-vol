@@ -82,7 +82,7 @@ def _laguerre_basis(x, order=3):
 def _ols_fit_predict(Phi, y, Phi_all, ridge=0.0, ridge_eps=1e-12):
     """
     Solve min ||Phi * beta - y||_2 (optionally ridge) and predict on Phi_all.
-    Pure NumPy/LAPACK backend. If ridge>0, solves (Phi^T Phi + (ridge+eps) I) beta = Phi^T y.
+    Pure NumPy backend. If ridge>0, solves (Phi^T Phi + (ridge+eps) I) beta = Phi^T y.
     Safeguards: if Phi has zero rows, return zeros; if lstsq fails, fall back to tiny ridge.
     """
     Phi = np.asarray(Phi, dtype=float, order="C")
