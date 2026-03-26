@@ -70,7 +70,7 @@ else:
 print(f"\n[4] LLH MODEL TEST (1 month)")
 print("-" * 80)
 model_llh = pm.ImprovedSteinStein(
-    r=0.3943, rho=0.1691, kappa=4.9394, nu=0.4,
+    r=0.01, rho=0.1691, kappa=4.9394, nu=0.3943,
     sigma0=0.2924, theta0=0.1319, lam=0.3115, eta=0.4112, seed=42
 )
 

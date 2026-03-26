@@ -34,7 +34,7 @@ Reference parameters from Lin-Lin-He Table 2:
 
 | r | κ | ν | λ | η | ρ | σ₀ | θ₀ |
 |---|---|---|---|---|---|----|----|
-| 0.3943 | 4.9394 | 0.4 | 0.3115 | 0.4112 | 0.1691 | 0.2924 | 0.1319 |
+| 0.01 | 4.9394 | 0.3943 | 0.3115 | 0.4112 | 0.1691 | 0.2924 | 0.1319 |
 
 ---
 
@@ -103,7 +103,7 @@ import amOptPricer as aop
 
 # Simulate LLH paths
 rng = pm.np.random.default_rng(42)
-params = dict(r=0.3943, kappa=4.9394, nu=0.4, lam=0.3115,
+params = dict(r=0.01, kappa=4.9394, nu=0.3943, lam=0.3115,
               eta=0.4112, rho=0.1691, sigma0=0.2924, theta0=0.1319)
 
 S, sigma_hat = pm.simulate_llh(rng, S0=100, T=1.0, n_paths=10_000,
