@@ -30,7 +30,7 @@ The θ process drives a stochastic long-run mean for σ, making this a two-facto
 - **Black-Scholes** when κ = ν = λ = η = ρ = 0
 - **Stein-Stein (1991)** when λ = η = ρ = 0
 
-Reference parameters from Lin-Lin-He Table 2:
+Reference parameters from Lin-Lin-He Tables 1 and 2, e.g.:
 
 | r | κ | ν | λ | η | ρ | σ₀ | θ₀ |
 |---|---|---|---|---|---|----|----|
