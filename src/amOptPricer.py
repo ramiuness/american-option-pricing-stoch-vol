@@ -9,7 +9,7 @@ from numpy.polynomial.laguerre import lagvander
 #############################################################################
 def price_call_bs(S, K=90, tau=1.0, r=0.05, vol=0.2):
     """
-    Black-Scholes European call price using the Black-Scholes formula.`
+    Black-Scholes European call price using the Black-Scholes formula.
     """
     if tau <= 0:
         return max(0.0, S - K)
@@ -18,14 +18,14 @@ def price_call_bs(S, K=90, tau=1.0, r=0.05, vol=0.2):
     d2 = d1 - v
     return float(S * norm.cdf(d1) - K * np.exp(-r*tau) * norm.cdf(d2))
 
-def price_call_mc(paths, K, T, r=None, seed=None):
+def price_call_mc(paths, K, T, r=None):
     """
     Monte Carlo European call pricing 
     K: strike
     r: discount rate (or taken from simulator if None)
     Returns dict with price, std_err, ci_95, n_paths.
     """
-    # Discover steps M, initial spot S0, dt
+    # Find steps M, initial spot S0, dt
     n_paths = paths.shape[0]
     disc = np.exp(-r * T)
 
@@ -156,25 +156,19 @@ def _bs_put_vec(S, K, tau, r, vol):
 
 def _euro_put_llh_slice(model, S_col, vol_col, theta_col, tau, K, pre=None):
     """
-    European PUT under Lin–Lin–He via parity at a fixed time slice (vectorized):
+    European PUT under Lin-Lin-He via parity at a fixed time slice (vectorized):
       Put = Call - S + K*exp(-r*tau), using model.price_call_llh_vec.
     """
     S_col = np.asarray(S_col, dtype=float).reshape(-1)
     vol_col = np.asarray(vol_col, dtype=float).reshape(-1)
     theta_col = np.asarray(theta_col, dtype=float).reshape(-1)
-    calls = None
-    if hasattr(model, 'price_call_llh_vec'):
-        calls = model.price_call_llh_vec(S_col, K, tau, vol_col, theta_col, pre=pre)
-    else:
-        calls = np.empty_like(S_col, dtype=float)
-        for i in range(S_col.shape[0]):
-            calls[i] = model.price_call_llh(S_col[i], K, tau, vol_col[i], theta_col[i])
+    calls = model.price_call_llh_vec(S_col, K, tau, vol_col, theta_col, pre=pre)     
     return calls - S_col + K * np.exp(-model.r * tau)
 
 
 def _euro_put_bs_slice(model, S_col, vol_col, tau, K):
     """
-    European PUT via Black–Scholes proxy at slice (vectorized):
+    European PUT via Black-Scholes proxy at slice (vectorized):
       P_BS(S_j, K, tau_j, r, sigma_hat_j).
     """
     return _bs_put_vec(S_col, K, tau, model.r, vol_col)
@@ -214,61 +208,23 @@ def price_american_put_lsm_llh(model, sim_out, K, basis_order=3,
                                euro_method='llh',
                                phi_max=300.0, n_phi=513, n_steps_rk4=128, eps0=1e-6):
     """
-    LSM pricer for an American PUT with optional Rasmussen-style control variates.
-    Dynamics: Lin–Lin–He (Improved Stein–Stein); paths come from `sim_out`.
+    LSM American put pricer with optional Rasmussen control variates.
 
     Parameters
     ----------
-    model : ImprovedSteinStein
-        The LLH model instance with parameters.
-    sim_out : dict
-        Simulated paths from model.simulate_prices(), contains 'S', 'sigma_hat', 'B', 'dt'.
-    K : float
-        Strike price.
-    basis_order : int, default=3
-        Order of Laguerre polynomial basis for regression.
-    use_cv : bool, default=True
-        Whether to use control variates (Rasmussen approach).
-    improved : bool, default=True
-        Whether to compute improved estimator with global control parameter.
-    ridge : float, default=0.0
-        Ridge regularization parameter for OLS regressions.
-    euro_method : {'llh', 'bs', 'mc1'}, default='llh'
-        Method for European option pricing:
-        - 'llh': Lin-Lin-He formula (accurate but slow)
-        - 'bs': Black-Scholes proxy (fast approximation)
-        - 'mc1': Same-path Monte Carlo estimate
-
-    **LLH Integration Parameters** (only used if euro_method='llh'):
-    phi_max : float, default=300.0
-        Maximum frequency for Simpson quadrature. Higher captures tail better.
-        Recommended: 200 (FAST), 300 (STANDARD), 400 (HIGH_ACCURACY).
-    n_phi : int, default=513
-        Number of quadrature points (must be odd). Error ~ O(phi_max/n_phi)^4.
-        Recommended: 257 (FAST), 513 (STANDARD), 1025 (HIGH_ACCURACY).
-    n_steps_rk4 : int, default=128
-        Number of RK4 steps for ODE integration. Error ~ O(tau/n_steps)^5.
-        Recommended: 32 (FAST), 128 (STANDARD), 256 (HIGH_ACCURACY).
-    eps0 : float, default=1e-6
-        Minimum frequency to avoid division by zero in quadrature.
+    model      : ImprovedSteinStein instance
+    sim_out    : dict from model.simulate_prices() — keys 'S', 'sigma_hat', 'B', 'dt'
+    K          : strike
+    use_cv     : if False, runs standard LSM (no European pricing, ~500x faster)
+    improved   : if True and use_cv=True, adds global CV estimator
+    euro_method: 'llh' | 'bs' | 'mc1' — European pricing for CV (only when use_cv=True)
+    phi_max, n_phi, n_steps_rk4, eps0 : LLH quadrature params (only when euro_method='llh')
 
     Returns
     -------
-    dict with keys:
-        'price' : float
-            American put price (LSM estimate).
-        'std_err' : float
-            Standard error of the estimate.
-        'ci_95' : tuple
-            95% confidence interval (lower, upper).
-        'n_paths' : int
-            Number of simulated paths used.
-        'price_imp' : float (if improved=True)
-            Improved estimate with global control parameter.
-        'std_err_imp' : float (if improved=True)
-            Standard error of improved estimate.
-        'ci_95_imp' : tuple (if improved=True)
-            95% CI for improved estimate.
+    dict:
+      price, std_err, ci_95, n_paths, stop_idx
+      + price_imp, std_err_imp, ci_95_imp  (when use_cv and improved)
 
     Notes
     -----

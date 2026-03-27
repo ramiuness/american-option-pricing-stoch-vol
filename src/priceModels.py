@@ -1,3 +1,8 @@
+"""
+LLH (Lin-Lin-He) stochastic volatility model: simulation + European pricing.
+See reports/eur_price_llh.pdf for the theoretical derivation.
+"""
+
 from dataclasses import dataclass 
 import amOptPricer as aop 
 import numpy as np
@@ -25,7 +30,7 @@ def brownian_from_normals(Z: np.ndarray, dt: float):
     return dW, W
 
 def gbm_from_formula(W: np.ndarray, dt: float):
-    """B_t = exp(W_t - t/2), ΔB = B - B_prev with B_0=1."""
+    """B = exp(W - 0.5*t) where W is Brownian motion at times t=dt, 2dt, ..., n*dt."""
     n = W.shape[1]
     t_grid = dt * np.arange(1, n + 1)[None, :] # broadcast to shape (1, n); same effect as [np.newaxis, :]
     B = np.exp(W - 0.5 * t_grid)
@@ -35,7 +40,7 @@ def causal_exp_conv(X: np.ndarray, a1: float):
     """
     Causal exponential-kernel convolution:
       s_j = sum_{i=1}^j (a1**i) * X_{j-i},  j=1..n
-    Implemented via reweight + cumsum (fully vectorized).
+    Implemented via reweight + cumsum.
     """
     n = X.shape[1]
     j = np.arange(n)
@@ -55,13 +60,13 @@ def sigma_hat_from_components(
     Returns (n_paths, n_steps_mc).
     """
     n_paths = W2.shape[0]
-    idx = np.arange(0, n_steps_mc)[None, :]          # j = 0, 1, ..., n-1
+    idx = np.arange(0, n_steps_mc)[None, :]          # shape (1, n_steps_mc)
     exp_kdt_idx = np.exp(-kappa * idx * dt)
     a1 = np.exp(-kappa * dt)
 
-    # Prepend t=0 values: W²_0 = 0, B_0 - 1 = 0
+    # Shift W2 and B-1 to align with the convolution sums:
     zero_col = np.zeros((n_paths, 1))
-    W2_shifted  = np.concatenate([zero_col, W2[:, :-1]], axis=1)   # W² at times 0, Δt, ..., (n-1)Δt
+    W2_shifted  = np.concatenate([zero_col, W2[:, :-1]], axis=1)   # W2 at times 0, Δt, ..., (n-1)Δt
     Bm1_shifted = np.concatenate([zero_col, (B - 1.0)[:, :-1]], axis=1)  # B-1 at times 0, Δt, ..., (n-1)Δt
 
     term_W2  = causal_exp_conv(W2_shifted, a1)
@@ -148,10 +153,9 @@ def test_lognormality(data):
 #     phi[0] = eps0
 #     return phi
 
-# ---------- Trapezoid (Boyarchenko–Levendorskiĭ) utilities ----------
-# Trapezoid quadrature to compute P_j's, fixed uniform φ-grid, batched over φ, j=1,2
-
-def trap_weights(n, simplified=True):
+# ---------- Trapezoid (Boyarchenko–Levendorskii) utilities ----------
+# Trapezoid weights for uniform grid, with optional simplification (half weight only at φ=0) as in Boyarchenko–Levendorskii (Eq. 2.31).
+def trap_weights(n, simplified=False):
     """
     Composite trapezoid weights for n nodes (uniform grid).
     If simplified=True, apply 1/2 only at the first node (φ=0) as in (2.31);
@@ -160,7 +164,7 @@ def trap_weights(n, simplified=True):
     """
     w = np.ones(n, dtype=np.float64)
     w[0] = 0.5
-    if simplified:
+    if not simplified:
         w[-1] = 0.5
     return w
 
@@ -311,7 +315,7 @@ def compute_P_vec(f, K, phi, w):
 
 
 # ---------- Precompute holder ----------
-
+# @dataclass keeps this class concise by auto-generating __init__/__repr__/__eq__; remove it only if you add those methods manually.
 @dataclass
 class LLHPrecompute:
     """Precomputed phi-grid, Simpson weights, and RK4 coefficients for a given tau."""
@@ -323,7 +327,7 @@ class LLHPrecompute:
 
 @dataclass
 class ImprovedSteinStein:
-    """Simulator for the four-step price algorithm (vectorized over paths)."""
+    """Simulator for the four-step price algorithm."""
     r: float
     sigma0: float
     theta0: float
