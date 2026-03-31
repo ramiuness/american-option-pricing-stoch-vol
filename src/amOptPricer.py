@@ -162,7 +162,7 @@ def _euro_put_llh_slice(model, S_col, vol_col, theta_col, tau, K, pre=None):
     S_col = np.asarray(S_col, dtype=float).reshape(-1)
     vol_col = np.asarray(vol_col, dtype=float).reshape(-1)
     theta_col = np.asarray(theta_col, dtype=float).reshape(-1)
-    calls = model.price_call_llh_vec(S_col, K, tau, vol_col, theta_col, pre=pre)     
+    calls = model.price_call_llh(S_col, K, tau, vol_col, theta_col, pre=pre)     
     return calls - S_col + K * np.exp(-model.r * tau)
 
 
