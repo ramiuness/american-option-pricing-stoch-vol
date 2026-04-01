@@ -1,6 +1,7 @@
-from dataclasses import dataclass 
+from dataclasses import dataclass
 import numpy as np
 from scipy.stats import norm
+from scipy.special import ndtr
 from numpy.polynomial.laguerre import lagvander
 
 
@@ -20,21 +21,18 @@ def price_call_bs(S, K=90, tau=1.0, r=0.05, vol=0.2):
 
 def price_call_mc(paths, K, T, r=None):
     """
-    Monte Carlo European call pricing 
+    Monte Carlo European call pricing
     K: strike
     r: discount rate (or taken from simulator if None)
     Returns dict with price, std_err, ci_95, n_paths.
     """
-    # Find steps M, initial spot S0, dt
     n_paths = paths.shape[0]
     disc = np.exp(-r * T)
 
-    # Payoff at maturity
     Y = disc * np.maximum(paths[:, -1] - K, 0.0)
 
-    # Statistics
     price = Y.mean()
-    std_err = Y.std(ddof=1) / np.sqrt(n_paths) #verify the ci
+    std_err = Y.std(ddof=1) / np.sqrt(n_paths)
     ci95 = (price - 1.96*std_err, price + 1.96*std_err)
 
     return {
@@ -108,19 +106,40 @@ def _ols_fit_predict(Phi, y, Phi_all, ridge=0.0, ridge_eps=1e-12):
     return Phi_all @ beta
 
 
+def _ols_fit_predict_multi(Phi, Y_mat, Phi_all, ridge=0.0, ridge_eps=1e-12):
+    """
+    Solve multiple regressions sharing the same design matrix Phi.
+    Factorizes (Phi^T Phi + ridge*I) once, solves for all k RHS columns.
+
+    Phi     : (n_itm, p)
+    Y_mat   : (n_itm, k)
+    Phi_all : (n_paths, p)
+    Returns : (n_paths, k)
+    """
+    if Phi.shape[0] == 0:
+        return np.zeros((Phi_all.shape[0], Y_mat.shape[1]), dtype=float)
+
+    n_features = Phi.shape[1]
+    A = Phi.T @ Phi
+    B_rhs = Phi.T @ Y_mat
+
+    reg = max(float(ridge), 0.0) + float(ridge_eps)
+    try:
+        Beta = np.linalg.solve(A + reg * np.eye(n_features), B_rhs)
+    except np.linalg.LinAlgError:
+        Beta, *_ = np.linalg.lstsq(A + reg * np.eye(n_features), B_rhs, rcond=None)
+    return Phi_all @ Beta
+
+
 def _theta_lr_grid(B, theta0, lam, eta, dt, n_steps, n_paths):
     """
-    Build long-run mean process θ_t on the simulation grid.
-    Returns (n_paths, n_steps+1); col 0 = θ0; for j>=1:
-      θ[:, j] = θ0 + lam*(j*dt) + eta*(B[:, j-1] - 1).
-
-    Note: B has shape (n_paths, n_steps), so broadcasting B to theta[:, 1:]
-    correctly implements theta[:, j] = ... + eta*(B[:, j-1] - 1) for j=1..n_steps.
+    Build long-run mean process theta_t on the simulation grid.
+    Returns (n_paths, n_steps+1); col 0 = theta0; for j>=1:
+      theta[:, j] = theta0 + lam*(j*dt) + eta*(B[:, j-1] - 1).
     """
     theta = np.empty((n_paths, n_steps + 1), dtype=float)
     theta[:, 0] = float(theta0)
     t_index = np.arange(1, n_steps + 1, dtype=float) * dt
-    # This broadcast correctly aligns: theta[:, j] uses B[:, j-1]
     theta[:, 1:] = theta0 + lam * t_index[None, :] + eta * (B - 1.0)
     return theta
 
@@ -129,7 +148,7 @@ def _theta_lr_grid(B, theta0, lam, eta, dt, n_steps, n_paths):
 
 def _bs_put_vec(S, K, tau, r, vol):
     """
-    Vectorized Black–Scholes PUT price with continuous compounding (no dividends).
+    Vectorized Black-Scholes PUT price with continuous compounding (no dividends).
     Inputs broadcast along the first dimension; returns 1-D array.
     """
     S = np.asarray(S, dtype=float).ravel()
@@ -143,10 +162,9 @@ def _bs_put_vec(S, K, tau, r, vol):
     with np.errstate(divide="ignore", invalid="ignore"):
         d1 = (np.log(S / K) + (r + 0.5 * vol**2) * tau) / (vol * sqrt_tau)
         d2 = d1 - vol * sqrt_tau
-    N = norm.cdf
+    N = ndtr
     discK = K * np.exp(-r * tau)
     put = discK * N(-d2) - S * N(-d1)
-    # handle vol=0 edge
     zero_vol = (vol <= 0.0)
     if np.any(zero_vol):
         intrinsic = np.maximum(discK - S, 0.0)
@@ -157,12 +175,12 @@ def _bs_put_vec(S, K, tau, r, vol):
 def _euro_put_llh_slice(model, S_col, vol_col, theta_col, tau, K, pre=None):
     """
     European PUT under Lin-Lin-He via parity at a fixed time slice (vectorized):
-      Put = Call - S + K*exp(-r*tau), using model.price_call_llh_vec.
+      Put = Call - S + K*exp(-r*tau), using model.price_call_llh.
     """
     S_col = np.asarray(S_col, dtype=float).reshape(-1)
     vol_col = np.asarray(vol_col, dtype=float).reshape(-1)
     theta_col = np.asarray(theta_col, dtype=float).reshape(-1)
-    calls = model.price_call_llh(S_col, K, tau, vol_col, theta_col, pre=pre)     
+    calls = model.price_call_llh(S_col, K, tau, vol_col, theta_col, pre=pre)
     return calls - S_col + K * np.exp(-model.r * tau)
 
 
@@ -177,7 +195,7 @@ def _euro_put_bs_slice(model, S_col, vol_col, tau, K):
 def _euro_put_mc1_slice(sim_out, j, r, K):
     """
     European PUT via one-sample MC using terminal payoff on the same path:
-      E_j^i ≈ e^{-r(T - t_j)} (K - S_T^i)^+.
+      E_j^i = e^{-r(T - t_j)} (K - S_T^i)^+.
     """
     S_T = np.asarray(sim_out['S'][:, -1], dtype=float)
     dt = float(sim_out['dt'])
@@ -189,7 +207,7 @@ def _euro_put_mc1_slice(sim_out, j, r, K):
 def _euro_put_slice(method, model, sim_out, j, S_col, vol_col, theta_col, tau, K, llh_pre=None):
     """
     Dispatcher for E_j at a slice:
-      method ∈ {'llh','bs','mc1'}.
+      method in {'llh','bs','mc1'}.
     """
     if method == 'llh':
         return _euro_put_llh_slice(model, S_col, vol_col, theta_col, tau, K, pre=llh_pre)
@@ -205,33 +223,35 @@ def _euro_put_slice(method, model, sim_out, j, S_col, vol_col, theta_col, tau, K
 
 def price_american_put_lsm_llh(model, sim_out, K, basis_order=3,
                                use_cv=True, improved=True, ridge=0.0,
-                               euro_method='llh',
+                               euro_method='llh', floor_method='bs',
                                phi_max=300.0, n_phi=513, n_steps_rk4=128, eps0=1e-6):
     """
     LSM American put pricer with optional Rasmussen control variates.
 
     Parameters
     ----------
-    model      : ImprovedSteinStein instance
-    sim_out    : dict from model.simulate_prices() — keys 'S', 'sigma_hat', 'B', 'dt'
-    K          : strike
-    use_cv     : if False, runs standard LSM (no European pricing, ~500x faster)
-    improved   : if True and use_cv=True, adds global CV estimator
-    euro_method: 'llh' | 'bs' | 'mc1' — European pricing for CV (only when use_cv=True)
+    model        : ImprovedSteinStein instance
+    sim_out      : dict from model.simulate_prices() — keys 'S', 'sigma_hat', 'B', 'dt'
+    K            : strike
+    use_cv       : if False, runs plain LSM with European exercise floor
+    improved     : if True and use_cv=True, adds global CV estimator
+    euro_method  : 'llh' | 'bs' | 'mc1' — European pricing for CV (only when use_cv=True)
+    floor_method : 'bs' | 'llh' — European floor for exercise safety when use_cv=False.
+                   Default 'bs' is fast; 'llh' is accurate but ~100x slower.
     phi_max, n_phi, n_steps_rk4, eps0 : LLH quadrature params (only when euro_method='llh')
 
     Returns
     -------
     dict:
-      price, std_err, ci_95, n_paths, stop_idx
-      + price_imp, std_err_imp, ci_95_imp  (when use_cv and improved)
+      price, std_err, ci_95, n_paths
+      + price_imp, std_err_imp, ci_95_imp  (when use_cv=True and improved=True)
 
     Notes
     -----
-    Defaults (phi_max=300, n_phi=513, n_steps_rk4=128) correspond to STANDARD preset,
-    which balances accuracy and speed. For faster testing, use FAST preset
-    (phi_max=200, n_phi=257, n_steps_rk4=32). For publication, use HIGH_ACCURACY
-    (phi_max=400, n_phi=1025, n_steps_rk4=256).
+    When use_cv=True, the exercise rule is Ij > max(Ej, TV) using euro_method.
+    When use_cv=False, the exercise rule is Ij > max(Ej, tildeV) using floor_method.
+
+    Defaults (phi_max=300, n_phi=513, n_steps_rk4=128) correspond to STANDARD preset.
     """
     S = sim_out['S']
     sigma_hat = sim_out['sigma_hat']
@@ -243,98 +263,138 @@ def price_american_put_lsm_llh(model, sim_out, K, basis_order=3,
     n_steps = n_cols - 1
     disc = np.exp(-r * dt)
 
-    # θ_t aligned with S
-    theta_lr = _theta_lr_grid(B, model.theta0, model.lam, model.eta, dt, n_steps, n_paths)
+    # theta_t aligned with S (needed when LLH European pricing is used in any mode)
+    need_theta = (use_cv and euro_method == 'llh') or (not use_cv and floor_method == 'llh')
+    theta_lr = _theta_lr_grid(B, model.theta0, model.lam, model.eta, dt, n_steps, n_paths) if need_theta else None
 
     # Initialize at maturity t_N
     CF = np.maximum(K - S[:, -1], 0.0)
-    CV = CF.copy()
-    stop_idx = np.full(n_paths, n_steps, dtype=int)
+    CV = CF.copy() if use_cv else None
 
     CF_1 = CV_1 = E_1 = None
 
-    # Precompute all unique τ values (only if using LLH)
+    # Precompute all unique tau values (when LLH European pricing is used in any mode)
+    # Use integer step count as key to avoid float-equality fragility
     tau_cache = {}
-    if euro_method == 'llh':
+    if (use_cv and euro_method == 'llh') or (not use_cv and floor_method == 'llh'):
         for j in range(1, n_steps):
-            tauj = (n_steps - j) * dt
-            if tauj not in tau_cache:
-                tau_cache[tauj] = model.llh_precompute_tau(
-                    tauj, phi_max=phi_max, n_phi=n_phi,
+            steps_remaining = n_steps - j
+            if steps_remaining not in tau_cache:
+                tau_cache[steps_remaining] = model.llh_precompute_tau(
+                    steps_remaining * dt, phi_max=phi_max, n_phi=n_phi,
                     n_steps_ode=n_steps_rk4, eps0=eps0
                 )
+
+    # Pre-allocate loop buffers (reused each iteration)
+    _Ij = np.empty(n_paths, dtype=float)
+    _x  = np.empty(n_paths, dtype=float)
 
     # Backward loop: j = N-1,...,1
     for j in range(n_steps - 1, 0, -1):
         # (i) discount one step
-        CF = disc * CF
-        CV = disc * CV
+        CF *= disc
+        if use_cv:
+            CV *= disc
 
         # Node data at t_j
         Sj = S[:, j]
-        # FIX: Use sigma_hat[:, j] for forward pricing from t_j
-        # sigma_hat[:, j] is volatility for interval [t_j, t_{j+1}]
-        volj = sigma_hat[:, j]  # Was: sigma_hat[:, j-1] (incorrect - off by one)
-        thetaj = theta_lr[:, j]
+        volj = sigma_hat[:, j]
+        thetaj = theta_lr[:, j] if theta_lr is not None else None
         tauj = (n_steps - j) * dt
 
-        # (A) Use cached τ-precompute if using LLH; otherwise None
-        pre_j = tau_cache.get(tauj) if euro_method == 'llh' else None
-
-        # (B) E_j: European PUT via selected method (vectorized)
-        Ej = _euro_put_slice(euro_method, model, sim_out, j, Sj, volj, thetaj, tauj, K, llh_pre=pre_j)
-
-        # Immediate exercise for PUT
-        Ij = np.maximum(K - Sj, 0.0)
+        # Immediate exercise for PUT (in-place)
+        np.subtract(K, Sj, out=_Ij)
+        np.maximum(_Ij, 0.0, out=_Ij)
+        Ij = _Ij
 
         # ITM set and basis on x = S/K
-        x = Sj / K
-        Phi_all = _laguerre_basis(x, order=basis_order)
+        np.divide(Sj, K, out=_x)
+        Phi_all = _laguerre_basis(_x, order=basis_order)
         itm = (Ij > 0.0)
 
-        # (ii) estimators (regressions on ITM)
-        if itm.any():
-            Phi = Phi_all[itm, :]
-            tildeV  = _ols_fit_predict(Phi, CF[itm], Phi_all, ridge=ridge)
-            tildeVE = _ols_fit_predict(Phi, CV[itm], Phi_all, ridge=ridge)
-            aux1    = _ols_fit_predict(Phi, (Ej[itm] * CV[itm]), Phi_all, ridge=ridge)
-            aux2    = _ols_fit_predict(Phi, (CV[itm]**2),      Phi_all, ridge=ridge)
-        else:
-            tildeV = np.zeros_like(Sj)
-            tildeVE = np.zeros_like(Sj)
-            aux1 = np.zeros_like(Sj)
-            aux2 = np.ones_like(Sj)
-
-        # (Rasmussen CV test value)
         if use_cv:
-            denom = aux2 - (tildeVE**2)
+            # European PUT via selected method
+            steps_remaining = n_steps - j
+            pre_j = tau_cache.get(steps_remaining) if euro_method == 'llh' else None
+
+            # For j > 1, only compute Ej for ITM paths (OTM never exercise).
+            # At j == 1, compute for ALL paths (needed for E_1 in improved estimator).
+            if j == 1 or euro_method == 'mc1':
+                Ej = _euro_put_slice(euro_method, model, sim_out, j, Sj, volj, thetaj, tauj, K, llh_pre=pre_j)
+            else:
+                Ej = np.zeros(n_paths, dtype=float)
+                if itm.any():
+                    thetaj_itm = thetaj[itm] if thetaj is not None else None
+                    Ej[itm] = _euro_put_slice(
+                        euro_method, model, sim_out, j,
+                        Sj[itm], volj[itm], thetaj_itm, tauj, K, llh_pre=pre_j
+                    )
+
+            # 4 regressions with shared factorization
+            if itm.any():
+                Phi = Phi_all[itm, :]
+                CF_itm = CF[itm]
+                CV_itm = CV[itm]
+                Ej_itm = Ej[itm]
+                Y_mat = np.column_stack([CF_itm, CV_itm, Ej_itm * CV_itm, CV_itm**2])
+                preds = _ols_fit_predict_multi(Phi, Y_mat, Phi_all, ridge=ridge)
+                tildeV, tildeVE, aux1, aux2 = preds[:, 0], preds[:, 1], preds[:, 2], preds[:, 3]
+            else:
+                tildeV  = np.zeros_like(Sj)
+                tildeVE = np.zeros_like(Sj)
+                aux1    = np.zeros_like(Sj)
+                aux2    = np.ones_like(Sj)
+
+            # Rasmussen CV test value
+            denom = aux2 - tildeVE**2
             theta_cv = np.zeros_like(Sj)
             ok = np.abs(denom) > 1e-12
-            theta_cv[ok] = - (aux1[ok] - tildeV[ok]*tildeVE[ok]) / denom[ok]
+            theta_cv[ok] = -(aux1[ok] - tildeV[ok] * tildeVE[ok]) / denom[ok]
             TV = tildeV + theta_cv * (tildeVE - Ej)
+
+            # Exercise decision with European floor
+            ex_mask = Ij > np.maximum(Ej, TV)
+            if np.any(ex_mask):
+                CF[ex_mask] = Ij[ex_mask]
+                CV[ex_mask] = Ej[ex_mask]
+
+            # Save j==1 slice for final estimator
+            if j == 1:
+                CF_1 = CF.copy()
+                CV_1 = CV.copy()
+                E_1  = Ej.copy()
+
         else:
-            TV = tildeV
+            # Plain LSM: 1 regression + European floor for exercise safety.
+            # Default floor_method='bs' is fast (~free); 'llh' is available but expensive
+            # as it triggers ODE solves at every exercise date.
+            if floor_method == 'bs':
+                Ej = _euro_put_bs_slice(model, Sj, volj, tauj, K)
+            else:
+                steps_remaining = n_steps - j
+                pre_j = tau_cache.get(steps_remaining)
+                Ej = _euro_put_slice(floor_method, model, sim_out, j, Sj, volj, thetaj, tauj, K, llh_pre=pre_j)
 
-        # (iii) exercise decision
-        ex_mask = Ij > np.maximum(Ej, TV)
-        if np.any(ex_mask):
-            CF[ex_mask] = Ij[ex_mask]
-            CV[ex_mask] = Ej[ex_mask]
-            stop_idx[ex_mask] = j
+            if itm.any():
+                Phi = Phi_all[itm, :]
+                tildeV = _ols_fit_predict(Phi, CF[itm], Phi_all, ridge=ridge)
+            else:
+                tildeV = np.zeros_like(Sj)
 
-        # save j==1 slice for final estimator
-        if j == 1:
-            CF_1 = CF.copy()
-            CV_1 = CV.copy()
-            E_1  = Ej.copy()
+            # Exercise decision with European floor: Ij > max(Ej, tildeV)
+            ex_mask = Ij > np.maximum(Ej, tildeV)
+            if np.any(ex_mask):
+                CF[ex_mask] = Ij[ex_mask]
+
+            if j == 1:
+                CF_1 = CF.copy()
 
     # Time-0 estimators
-    disc1 = np.exp(-r * dt)
-    base_samples = disc1 * CF_1
+    base_samples = disc * CF_1
     I0 = max(K - S[0, 0], 0.0)
     price = max(I0, float(base_samples.mean()))
     std_err = base_samples.std(ddof=1) / np.sqrt(n_paths)
-    ci95 = (price - 1.96*std_err, price + 1.96*std_err)
+    ci95 = (price - 1.96 * std_err, price + 1.96 * std_err)
 
     out = {
         'price': price,
@@ -343,17 +403,17 @@ def price_american_put_lsm_llh(model, sim_out, K, basis_order=3,
         'n_paths': int(n_paths)
     }
 
-    if improved:
-        # Global θ̂ from OLS slope of CF_1 on CV_1
+    # Improved estimator only when CV is active
+    if use_cv and improved:
         X = CV_1 - CV_1.mean()
         Y = CF_1 - CF_1.mean()
         varX = X.var(ddof=1)
-        theta_global = 0.0 if varX <= 1e-16 else float((X*Y).sum() / ((n_paths - 1) * varX))
+        theta_global = 0.0 if varX <= 1e-16 else float((X * Y).sum() / ((n_paths - 1) * varX))
 
-        imp_samples = disc1 * (CF_1 + theta_global * (CV_1 - E_1))
+        imp_samples = disc * (CF_1 + theta_global * (CV_1 - E_1))
         price_imp = max(I0, float(imp_samples.mean()))
         std_err_imp = imp_samples.std(ddof=1) / np.sqrt(n_paths)
-        ci95_imp = (price_imp - 1.96*std_err_imp, price_imp + 1.96*std_err_imp)
+        ci95_imp = (price_imp - 1.96 * std_err_imp, price_imp + 1.96 * std_err_imp)
 
         out.update({
             'price_imp': price_imp,

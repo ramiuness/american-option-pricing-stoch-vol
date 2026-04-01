@@ -1,6 +1,7 @@
 import time
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
 import priceModels as pm
 import amOptPricer as aop
 
@@ -177,3 +178,224 @@ def sz_table2(rho_cases, theta_values, K_vals, bs_prices,
         df.index.name = f'{case_name} / K'
         tables[case_name] = df
     return tables
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# American pricing comparison helpers
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _model_attrs(model):
+    """Extract constructor kwargs from an ImprovedSteinStein instance."""
+    return {k: getattr(model, k)
+            for k in ['r', 'rho', 'kappa', 'nu', 'sigma0', 'theta0', 'lam', 'eta']}
+
+
+def american_put_comparison(model, K, S0_grid, moneyness_labels, T, n_steps_mc,
+                            n_paths, n_paths_llh, llh_params, seed=42):
+    """
+    Price American puts across moneyness levels with three methods.
+
+    Returns a DataFrame with columns for each method's price, SE, CI width,
+    variance reduction ratio (VR), and MC European put price.
+    """
+    rows = []
+    for s0, label in zip(S0_grid, moneyness_labels):
+        row = {'Moneyness': label, 'S0': s0}
+
+        # --- Shared simulation for plain LSM + CV-BS (n_paths) ---
+        m = pm.ImprovedSteinStein(**_model_attrs(model), seed=seed)
+        sim = m.simulate_prices(S0=s0, T=T, n_steps_mc=n_steps_mc, n_paths=n_paths)
+
+        # MC European put
+        res_mc_put = m.price_put_mc(sim, K=K)
+        row['MC_put_price'] = res_mc_put['price']
+        row['MC_put_se'] = res_mc_put['std_err']
+
+        # Plain LSM
+        res_plain = m.price_american_put(sim, K=K, use_cv=False, ridge=1e-5)
+        row['Plain_price'] = res_plain['price']
+        row['Plain_se'] = res_plain['std_err']
+        row['Plain_ci_w'] = res_plain['ci_95'][1] - res_plain['ci_95'][0]
+
+        # CV-BS
+        res_bs = m.price_american_put(sim, K=K, use_cv=True, euro_method='bs', ridge=1e-5)
+        row['BS_price'] = res_bs.get('price_imp', res_bs['price'])
+        row['BS_se'] = res_bs.get('std_err_imp', res_bs['std_err'])
+        ci_bs = res_bs.get('ci_95_imp', res_bs['ci_95'])
+        row['BS_ci_w'] = ci_bs[1] - ci_bs[0]
+        row['BS_VR'] = (res_plain['std_err'] / row['BS_se'])**2 if row['BS_se'] > 0 else np.nan
+
+        # --- Separate simulation for CV-LLH (n_paths_llh) ---
+        m2 = pm.ImprovedSteinStein(**_model_attrs(model), seed=seed)
+        sim_llh = m2.simulate_prices(S0=s0, T=T, n_steps_mc=n_steps_mc, n_paths=n_paths_llh)
+
+        # Plain LSM on the same small sim (for apples-to-apples VR)
+        res_plain_small = m2.price_american_put(sim_llh, K=K, use_cv=False, ridge=1e-5)
+
+        # CV-LLH
+        res_llh = m2.price_american_put(sim_llh, K=K, use_cv=True, euro_method='llh',
+                                        ridge=1e-5, **llh_params)
+        row['LLH_price'] = res_llh.get('price_imp', res_llh['price'])
+        row['LLH_se'] = res_llh.get('std_err_imp', res_llh['std_err'])
+        ci_llh = res_llh.get('ci_95_imp', res_llh['ci_95'])
+        row['LLH_ci_w'] = ci_llh[1] - ci_llh[0]
+        row['LLH_VR'] = (res_plain_small['std_err'] / row['LLH_se'])**2 if row['LLH_se'] > 0 else np.nan
+
+        rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
+def format_results_table(df):
+    """Format the raw comparison DataFrame for display."""
+    return pd.DataFrame({
+        'S0':            df['S0'].astype(int),
+        'MC Put':        df['MC_put_price'].round(4),
+        'MC Put SE':     df['MC_put_se'].round(4),
+        'LSM Price':     df['Plain_price'].round(4),
+        'LSM SE':        df['Plain_se'].round(4),
+        'CV-BS Price':   df['BS_price'].round(4),
+        'CV-BS SE':      df['BS_se'].round(4),
+        'CV-BS VR':      df['BS_VR'].round(1),
+        'CV-LLH Price':  df['LLH_price'].round(4),
+        'CV-LLH SE':     df['LLH_se'].round(4),
+        'CV-LLH VR':     df['LLH_VR'].round(1),
+    }).set_index(df['Moneyness'])
+
+
+def build_vr_summary(results_dict):
+    """
+    Consolidate variance reduction ratios from multiple comparison DataFrames.
+
+    Parameters
+    ----------
+    results_dict : dict  {label: DataFrame} e.g. {'T1, 1m': df_t1_1m, ...}
+
+    Returns
+    -------
+    vr_df : DataFrame with columns Setting, Moneyness, CV-BS VR, CV-LLH VR
+    """
+    vr_rows = []
+    for label, df in results_dict.items():
+        for _, row in df.iterrows():
+            vr_rows.append({
+                'Setting': label,
+                'Moneyness': row['Moneyness'],
+                'CV-BS VR': row['BS_VR'],
+                'CV-LLH VR': row['LLH_VR'],
+            })
+    return pd.DataFrame(vr_rows)
+
+
+def plot_vr_bars(vr_df, moneyness_labels):
+    """Plot variance reduction ratio bar charts for CV-BS and CV-LLH."""
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharey=True)
+    for ax, method, col in zip(axes, ['CV-BS', 'CV-LLH'], ['CV-BS VR', 'CV-LLH VR']):
+        pivot = vr_df.pivot(index='Moneyness', columns='Setting', values=col)
+        pivot.loc[moneyness_labels].plot.bar(ax=ax, rot=0)
+        ax.set_title(f'Variance Reduction Ratio — {method}')
+        ax.set_ylabel('VR Ratio')
+        ax.axhline(y=1, color='gray', linestyle='--', alpha=0.5, label='VR = 1')
+        ax.legend(title='Setting', fontsize=8)
+    plt.tight_layout()
+    plt.show()
+
+
+def build_eep_table(results_dict, models_dict, K,
+                    phi_max=300.0, n_phi=513, n_steps_ode=128):
+    """
+    Compute early exercise premium (EEP) table.
+
+    Parameters
+    ----------
+    results_dict : dict  {(params_label, horizon_label): DataFrame}
+        e.g. {('Table 1', '1-month'): df_t1_1m, ...}
+    models_dict : dict  {params_label: model}
+        e.g. {'Table 1': model_t1, 'Table 2': model_t2}
+    K : float  strike
+
+    Returns
+    -------
+    eep_df : DataFrame indexed by (Params, Horizon, Moneyness)
+    """
+    horizons = {'1-month': 1/12, '1-year': 1.0}
+    eep_rows = []
+    for (params_label, horizon_label), df in results_dict.items():
+        model = models_dict[params_label]
+        T = horizons[horizon_label]
+        for _, row in df.iterrows():
+            s0 = row['S0']
+            euro_put = model.price_put_llh(
+                S=s0, K=K, tau=T, vol=model.sigma0, theta=model.theta0,
+                phi_max=phi_max, n_phi=n_phi, n_steps_ode=n_steps_ode
+            ).item()
+            am_price = row['Plain_price']
+            eep = am_price - euro_put
+            eep_rows.append({
+                'Params': params_label,
+                'Horizon': horizon_label,
+                'Moneyness': row['Moneyness'],
+                'S0': int(s0),
+                'Euro Put (LLH)': round(euro_put, 4),
+                'Amer Put (LSM)': round(am_price, 4),
+                'EEP': round(eep, 4),
+                'EEP (%)': round(eep / euro_put * 100, 2) if euro_put > 0.01 else np.nan,
+            })
+
+    eep_df = pd.DataFrame(eep_rows)
+    return eep_df.set_index(['Params', 'Horizon', 'Moneyness'])
+
+
+def build_timing_table(model, K, S0, horizons, n_paths, n_paths_llh,
+                       llh_params, seed=42):
+    """
+    Time the three pricing methods across horizons.
+
+    Parameters
+    ----------
+    model : ImprovedSteinStein
+    K, S0 : float
+    horizons : dict  {label: {'T': float, 'n_steps_mc': int}}
+    n_paths, n_paths_llh : int
+    llh_params : dict  passed to price_american_put for LLH mode
+
+    Returns
+    -------
+    pd.DataFrame indexed by Horizon
+    """
+    timing_rows = []
+    for horizon_label, hparams in horizons.items():
+        T, n_steps = hparams['T'], hparams['n_steps_mc']
+        m = pm.ImprovedSteinStein(**_model_attrs(model), seed=seed)
+
+        # Shared simulation for plain + CV-BS
+        sim = m.simulate_prices(S0=S0, T=T, n_steps_mc=n_steps, n_paths=n_paths)
+
+        # Plain LSM
+        t0 = time.perf_counter()
+        res_p = m.price_american_put(sim, K=K, use_cv=False, ridge=1e-5)
+        t_plain = time.perf_counter() - t0
+
+        # CV-BS
+        t0 = time.perf_counter()
+        res_b = m.price_american_put(sim, K=K, use_cv=True, euro_method='bs', ridge=1e-5)
+        t_bs = time.perf_counter() - t0
+
+        # CV-LLH
+        sim_llh = m.simulate_prices(S0=S0, T=T, n_steps_mc=n_steps, n_paths=n_paths_llh)
+        t0 = time.perf_counter()
+        res_l = m.price_american_put(sim_llh, K=K, use_cv=True, euro_method='llh',
+                                     ridge=1e-5, **llh_params)
+        t_llh = time.perf_counter() - t0
+
+        timing_rows.append({
+            'Horizon': horizon_label,
+            'Plain LSM (s)':  round(t_plain, 3),
+            'Plain LSM SE':   round(res_p['std_err'], 4),
+            'CV-BS (s)':      round(t_bs, 3),
+            'CV-BS SE':       round(res_b.get('std_err_imp', res_b['std_err']), 4),
+            'CV-LLH (s)':     round(t_llh, 3),
+            'CV-LLH SE':      round(res_l.get('std_err_imp', res_l['std_err']), 4),
+        })
+
+    return pd.DataFrame(timing_rows).set_index('Horizon')
