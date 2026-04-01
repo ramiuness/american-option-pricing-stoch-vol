@@ -191,9 +191,14 @@ def _model_attrs(model):
 
 
 def american_put_comparison(model, K, S0_grid, moneyness_labels, T, n_steps_mc,
-                            n_paths, n_paths_llh, llh_params, seed=42):
+                            n_paths, n_paths_llh=None, llh_params=None,
+                            include_llh=True, seed=42):
     """
-    Price American puts across moneyness levels with three methods.
+    Price American puts across moneyness levels.
+
+    When include_llh=True (default), three methods are compared: Plain LSM,
+    CV-BS, and CV-LLH.  When include_llh=False, only Plain LSM and CV-BS are
+    computed (no LLH ODE solver is invoked).
 
     Returns a DataFrame with columns for each method's price, SE, CI width,
     variance reduction ratio (VR), and MC European put price.
@@ -225,21 +230,22 @@ def american_put_comparison(model, K, S0_grid, moneyness_labels, T, n_steps_mc,
         row['BS_ci_w'] = ci_bs[1] - ci_bs[0]
         row['BS_VR'] = (res_plain['std_err'] / row['BS_se'])**2 if row['BS_se'] > 0 else np.nan
 
-        # --- Separate simulation for CV-LLH (n_paths_llh) ---
-        m2 = pm.ImprovedSteinStein(**_model_attrs(model), seed=seed)
-        sim_llh = m2.simulate_prices(S0=s0, T=T, n_steps_mc=n_steps_mc, n_paths=n_paths_llh)
+        if include_llh:
+            # --- Separate simulation for CV-LLH (n_paths_llh) ---
+            m2 = pm.ImprovedSteinStein(**_model_attrs(model), seed=seed)
+            sim_llh = m2.simulate_prices(S0=s0, T=T, n_steps_mc=n_steps_mc, n_paths=n_paths_llh)
 
-        # Plain LSM on the same small sim (for apples-to-apples VR)
-        res_plain_small = m2.price_american_put(sim_llh, K=K, use_cv=False, ridge=1e-5)
+            # Plain LSM on the same small sim (for apples-to-apples VR)
+            res_plain_small = m2.price_american_put(sim_llh, K=K, use_cv=False, ridge=1e-5)
 
-        # CV-LLH
-        res_llh = m2.price_american_put(sim_llh, K=K, use_cv=True, euro_method='llh',
-                                        ridge=1e-5, **llh_params)
-        row['LLH_price'] = res_llh.get('price_imp', res_llh['price'])
-        row['LLH_se'] = res_llh.get('std_err_imp', res_llh['std_err'])
-        ci_llh = res_llh.get('ci_95_imp', res_llh['ci_95'])
-        row['LLH_ci_w'] = ci_llh[1] - ci_llh[0]
-        row['LLH_VR'] = (res_plain_small['std_err'] / row['LLH_se'])**2 if row['LLH_se'] > 0 else np.nan
+            # CV-LLH
+            res_llh = m2.price_american_put(sim_llh, K=K, use_cv=True, euro_method='llh',
+                                            ridge=1e-5, **llh_params)
+            row['LLH_price'] = res_llh.get('price_imp', res_llh['price'])
+            row['LLH_se'] = res_llh.get('std_err_imp', res_llh['std_err'])
+            ci_llh = res_llh.get('ci_95_imp', res_llh['ci_95'])
+            row['LLH_ci_w'] = ci_llh[1] - ci_llh[0]
+            row['LLH_VR'] = (res_plain_small['std_err'] / row['LLH_se'])**2 if row['LLH_se'] > 0 else np.nan
 
         rows.append(row)
 
@@ -247,8 +253,11 @@ def american_put_comparison(model, K, S0_grid, moneyness_labels, T, n_steps_mc,
 
 
 def format_results_table(df):
-    """Format the raw comparison DataFrame for display."""
-    return pd.DataFrame({
+    """Format the raw comparison DataFrame for display.
+
+    Automatically includes CV-LLH columns only when present in df.
+    """
+    cols = {
         'S0':            df['S0'].astype(int),
         'MC Put':        df['MC_put_price'].round(4),
         'MC Put SE':     df['MC_put_se'].round(4),
@@ -257,10 +266,12 @@ def format_results_table(df):
         'CV-BS Price':   df['BS_price'].round(4),
         'CV-BS SE':      df['BS_se'].round(4),
         'CV-BS VR':      df['BS_VR'].round(1),
-        'CV-LLH Price':  df['LLH_price'].round(4),
-        'CV-LLH SE':     df['LLH_se'].round(4),
-        'CV-LLH VR':     df['LLH_VR'].round(1),
-    }).set_index(df['Moneyness'])
+    }
+    if 'LLH_price' in df.columns:
+        cols['CV-LLH Price'] = df['LLH_price'].round(4)
+        cols['CV-LLH SE']    = df['LLH_se'].round(4)
+        cols['CV-LLH VR']    = df['LLH_VR'].round(1)
+    return pd.DataFrame(cols).set_index(df['Moneyness'])
 
 
 def build_vr_summary(results_dict):
@@ -301,10 +312,50 @@ def plot_vr_bars(vr_df, moneyness_labels):
     plt.show()
 
 
+def plot_american_put_prices(df, title='', cv_method='llh'):
+    """
+    Line chart: MC Put, Plain LSM, and a CV American put price vs S0.
+
+    Parameters
+    ----------
+    df         : raw DataFrame from american_put_comparison()
+    title      : figure title string
+    cv_method  : 'llh' (default) or 'bs' — selects which CV series to plot
+    """
+    s0 = df['S0'].values
+
+    if cv_method == 'bs':
+        cv_price, cv_se, cv_label = df['BS_price'], df['BS_se'], 'LSM + CV-BS'
+    else:
+        cv_price, cv_se, cv_label = df['LLH_price'], df['LLH_se'], 'LSM + CV-LLH'
+
+    fig, ax = plt.subplots(figsize=(7, 5))
+
+    ax.plot(s0, df['MC_put_price'], 's--', color='#2ca02c', label='Euro Put (MC)')
+    ax.errorbar(s0, df['Plain_price'], yerr=1.96 * df['Plain_se'],
+                fmt='o-', color='#1f77b4', capsize=4, label='Plain LSM')
+    ax.errorbar(s0, cv_price, yerr=1.96 * cv_se,
+                fmt='^-', color='#d62728', capsize=4, label=cv_label)
+
+    ax.set_xlabel('$S_0$')
+    ax.set_ylabel('Put price')
+    ax.set_title(title)
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+
+
 def build_eep_table(results_dict, models_dict, K,
                     phi_max=300.0, n_phi=513, n_steps_ode=128):
     """
     Compute early exercise premium (EEP) table.
+
+    EEP is computed relative to the MC European put price (already in the
+    raw DataFrames from american_put_comparison).  The LLH analytical
+    European put is included as a reference column.
+
+    Includes EEP for Plain LSM, CV-BS, and (when present) CV-LLH.
 
     Parameters
     ----------
@@ -323,27 +374,116 @@ def build_eep_table(results_dict, models_dict, K,
     for (params_label, horizon_label), df in results_dict.items():
         model = models_dict[params_label]
         T = horizons[horizon_label]
+        has_llh = 'LLH_price' in df.columns
         for _, row in df.iterrows():
             s0 = row['S0']
-            euro_put = model.price_put_llh(
+            mc_put = row['MC_put_price']
+            llh_put = model.price_put_llh(
                 S=s0, K=K, tau=T, vol=model.sigma0, theta=model.theta0,
                 phi_max=phi_max, n_phi=n_phi, n_steps_ode=n_steps_ode
             ).item()
-            am_price = row['Plain_price']
-            eep = am_price - euro_put
-            eep_rows.append({
+
+            am_lsm = row['Plain_price']
+            eep_lsm = am_lsm - mc_put
+
+            am_bs = row['BS_price']
+            eep_bs = am_bs - mc_put
+
+            entry = {
                 'Params': params_label,
                 'Horizon': horizon_label,
                 'Moneyness': row['Moneyness'],
                 'S0': int(s0),
-                'Euro Put (LLH)': round(euro_put, 4),
-                'Amer Put (LSM)': round(am_price, 4),
-                'EEP': round(eep, 4),
-                'EEP (%)': round(eep / euro_put * 100, 2) if euro_put > 0.01 else np.nan,
-            })
+                'Euro Put (MC)': round(mc_put, 4),
+                'Euro Put (LLH)': round(llh_put, 4),
+                'Amer Put (LSM)': round(am_lsm, 4),
+                'EEP (LSM)': round(eep_lsm, 4),
+                'EEP % (LSM)': round(eep_lsm / mc_put * 100, 2) if mc_put > 0.01 else np.nan,
+                'Amer Put (CV-BS)': round(am_bs, 4),
+                'EEP (CV-BS)': round(eep_bs, 4),
+                'EEP % (CV-BS)': round(eep_bs / mc_put * 100, 2) if mc_put > 0.01 else np.nan,
+            }
+
+            if has_llh:
+                am_llh = row['LLH_price']
+                eep_llh = am_llh - mc_put
+                entry['Amer Put (CV-LLH)'] = round(am_llh, 4)
+                entry['EEP (CV-LLH)'] = round(eep_llh, 4)
+                entry['EEP % (CV-LLH)'] = round(eep_llh / mc_put * 100, 2) if mc_put > 0.01 else np.nan
+
+            eep_rows.append(entry)
 
     eep_df = pd.DataFrame(eep_rows)
     return eep_df.set_index(['Params', 'Horizon', 'Moneyness'])
+
+
+def plot_eep_table(eep_df):
+    """
+    Multi-panel grouped bar chart of the early exercise premium by method.
+
+    Layout: one row per parameter set, one column per horizon.
+    Each panel shows grouped bars (LSM, CV-BS, and optionally CV-LLH)
+    across moneyness levels.
+
+    Parameters
+    ----------
+    eep_df : DataFrame from build_eep_table(), indexed by
+             (Params, Horizon, Moneyness)
+    """
+    params_list = eep_df.index.get_level_values('Params').unique().tolist()
+    horizon_list = eep_df.index.get_level_values('Horizon').unique().tolist()
+    n_rows = len(params_list)
+    n_cols = len(horizon_list)
+
+    has_llh = 'EEP % (CV-LLH)' in eep_df.columns
+
+    methods = ['EEP % (LSM)', 'EEP % (CV-BS)']
+    labels = ['Plain LSM', 'CV-BS']
+    colors = ['#1f77b4', '#d62728']
+    if has_llh:
+        methods.append('EEP % (CV-LLH)')
+        labels.append('CV-LLH')
+        colors.append('#ff7f0e')
+
+    fig, axes = plt.subplots(n_rows, n_cols,
+                             figsize=(6 * n_cols, 4.5 * n_rows),
+                             squeeze=False, sharey='row')
+
+    n_methods = len(methods)
+    bar_width = 0.8 / n_methods
+
+    for i, params in enumerate(params_list):
+        for j, horizon in enumerate(horizon_list):
+            ax = axes[i, j]
+            try:
+                sub = eep_df.loc[(params, horizon)]
+            except KeyError:
+                ax.set_visible(False)
+                continue
+
+            moneyness = sub.index.tolist()
+            x = np.arange(len(moneyness))
+
+            for k, (method, label, color) in enumerate(zip(methods, labels, colors)):
+                vals = sub[method].values
+                offset = (k - (n_methods - 1) / 2) * bar_width
+                ax.bar(x + offset, vals, bar_width, label=label, color=color,
+                       alpha=0.85)
+
+            ax.set_xticks(x)
+            ax.set_xticklabels(moneyness, rotation=30, ha='right', fontsize=9)
+            ax.set_title(f'{params}, {horizon}', fontsize=11)
+            ax.axhline(0, color='black', lw=0.5, ls='--')
+
+            if j == 0:
+                ax.set_ylabel('EEP (%)')
+            if i == 0 and j == n_cols - 1:
+                ax.legend(fontsize=9)
+
+    fig.suptitle('Early Exercise Premium by Method and Moneyness',
+                 fontsize=13, y=1.02)
+    fig.tight_layout()
+    plt.show()
 
 
 def build_timing_table(model, K, S0, horizons, n_paths, n_paths_llh,

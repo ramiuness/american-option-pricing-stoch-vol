@@ -52,7 +52,7 @@ src/
 
 notebooks/
   european_pricing.ipynb      # European price validation + S&Z Table 2 comparison
-  american_pricing.ipynb      # American put pricing: LSM vs CV-BS vs CV-LLH
+  american_pricing.ipynb      # American put pricing: LSM vs CV-BS vs CV-LLH + BS-limit validation
   calibration.ipynb           # Calibrate LLH to S&P 500 options
   char_func_symbolic.ipynb    # SymPy proof: ansatz non-closure (degree-4 argument)
   stylized_facts.ipynb        # Parameter impact on return distributions

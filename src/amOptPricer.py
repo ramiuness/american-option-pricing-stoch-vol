@@ -410,7 +410,7 @@ def price_american_put_lsm_llh(model, sim_out, K, basis_order=3,
         varX = X.var(ddof=1)
         theta_global = 0.0 if varX <= 1e-16 else float((X * Y).sum() / ((n_paths - 1) * varX))
 
-        imp_samples = disc * (CF_1 + theta_global * (CV_1 - E_1))
+        imp_samples = disc * (CF_1 - theta_global * (CV_1 - E_1))
         price_imp = max(I0, float(imp_samples.mean()))
         std_err_imp = imp_samples.std(ddof=1) / np.sqrt(n_paths)
         ci95_imp = (price_imp - 1.96 * std_err_imp, price_imp + 1.96 * std_err_imp)

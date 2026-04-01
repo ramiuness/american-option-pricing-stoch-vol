@@ -412,6 +412,87 @@ def plot_llh_lambda_eta_layers(pset_name, label,
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# Plot 5: American Put Prices (MC Put vs LSM vs CV-LLH)
+# ═══════════════════════════════════════════════════════════════════════
+
+HORIZON_CONFIGS = {
+    '1m': {'T': 1/12, 'n_steps_mc': 22,  'label': '1-month'},
+    '1y': {'T': 1.0,  'n_steps_mc': 52,  'label': '1-year'},
+}
+
+
+def plot_american_put_panels(pset_name, label, horizon_key,
+                             S0_values=(85.0, 90.0, 100.0, 110.0, 115.0),
+                             K_values=(80.0, 120.0),
+                             n_paths=10_000, seed=42,
+                             phi_max=300.0, n_phi=513, n_steps_rk4=128):
+    """
+    Two-panel figure: American put prices across S0 for K=80 and K=120.
+    Each panel has 3 lines: MC Put (dashed), Plain LSM, CV-LLH with SE error bars.
+    One figure per (param_set, maturity).
+    """
+    hcfg = HORIZON_CONFIGS[horizon_key]
+    T, n_steps_mc = hcfg['T'], hcfg['n_steps_mc']
+
+    # Collect data for each (S0, K)
+    data = {}  # (S0, K) -> {mc_put, lsm_price, lsm_se, llh_price, llh_se}
+    for S0 in S0_values:
+        model = _make_model(pset_name, seed=seed)
+        sim = model.simulate_prices(S0=S0, T=T, n_steps_mc=n_steps_mc, n_paths=n_paths)
+        for K in K_values:
+            mc_put = aop.price_put_mc(sim['S'], K=K, T=T, r=model.r)['price']
+
+            res_plain = aop.price_american_put_lsm_llh(
+                model, sim, K, use_cv=False, ridge=1e-5)
+
+            res_llh = aop.price_american_put_lsm_llh(
+                model, sim, K, use_cv=True, euro_method='llh', ridge=1e-5,
+                phi_max=phi_max, n_phi=n_phi, n_steps_rk4=n_steps_rk4)
+
+            data[(S0, K)] = {
+                'mc_put': mc_put,
+                'lsm_price': res_plain['price'],
+                'lsm_se': res_plain['std_err'],
+                'llh_price': res_llh.get('price_imp', res_llh['price']),
+                'llh_se': res_llh.get('std_err_imp', res_llh['std_err']),
+            }
+
+    n_panels = len(K_values)
+    fig, axes = plt.subplots(1, n_panels, figsize=(12, 5), sharey=False)
+    if n_panels == 1:
+        axes = [axes]
+
+    for i, (ax, K) in enumerate(zip(axes, K_values)):
+        mc = [data[(S0, K)]['mc_put'] for S0 in S0_values]
+        lsm = [data[(S0, K)]['lsm_price'] for S0 in S0_values]
+        lsm_se = [1.96 * data[(S0, K)]['lsm_se'] for S0 in S0_values]
+        llh = [data[(S0, K)]['llh_price'] for S0 in S0_values]
+        llh_se = [1.96 * data[(S0, K)]['llh_se'] for S0 in S0_values]
+
+        ax.plot(S0_values, mc, 's--', color='#2ca02c', label='Euro Put (MC)')
+        ax.errorbar(S0_values, lsm, yerr=lsm_se,
+                    fmt='o-', color='#1f77b4', capsize=4, label='Plain LSM')
+        ax.errorbar(S0_values, llh, yerr=llh_se,
+                    fmt='^-', color='#d62728', capsize=4, label='LSM + CV-LLH')
+
+        ax.set_xlabel('$S_0$')
+        ax.set_title(f'$K = {K:.0f}$')
+        ax.legend(fontsize=9)
+
+        if i == 0:
+            ax.set_ylabel('Put price')
+
+    fig.suptitle(
+        f'American put prices: MC Put vs LSM vs CV-LLH\n'
+        f'{label} params, {hcfg["label"]} horizon',
+        fontsize=13, y=1.03)
+    fig.tight_layout()
+    fname = f'fig5_american_put_{pset_name}_{horizon_key}.png'
+    _savefig(fig, fname)
+    print(f"  Saved {fname}")
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # Main
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -440,6 +521,11 @@ def _run_param_set(pset_name):
 
     print("  Plot 4b: LLH lambda-eta layers...")
     plot_llh_lambda_eta_layers(pset_name, label)
+
+    for hkey in HORIZON_CONFIGS:
+        hlbl = HORIZON_CONFIGS[hkey]['label']
+        print(f"  Plot 5: American put panels ({hlbl})...")
+        plot_american_put_panels(pset_name, label, hkey)
 
 
 def main():
