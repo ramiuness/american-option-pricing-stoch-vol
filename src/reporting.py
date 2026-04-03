@@ -112,7 +112,7 @@ def llh_vs_mc_timing(model, S0, K, scenarios, n_paths,
             t0 = time.perf_counter()
             res_mc = model.simulate_prices(S0=S0, T=tau,
                                            n_steps_mc=n_steps_mc, n_paths=n_paths)
-            p_mc = aop.price_call_mc(res_mc['S'], K=K, T=tau, r=model.r)['price']
+            p_mc = pm.price_call_mc(res_mc['S'], K=K, T=tau, r=model.r)['price']
             times_mc.append(time.perf_counter() - t0)
         t_mc = np.median(times_mc)
 

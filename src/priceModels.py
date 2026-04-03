@@ -50,7 +50,11 @@ def causal_exp_conv(X: np.ndarray, a1: float):
 
 
 def _causal_exp_conv_pair(X1, X2, a1):
-    """Two causal exponential convolutions sharing the same power arrays."""
+    """Two causal exponential convolutions sharing the same power arrays.
+
+    Equivalent to (causal_exp_conv(X1, a1), causal_exp_conv(X2, a1))
+    but reuses the a1^(-j) and a1^(j+1) arrays to halve allocation.
+    """
     n = X1.shape[1]
     j = np.arange(n)
     pow_neg = (a1 ** (-j))[None, :]
@@ -139,6 +143,68 @@ def test_lognormality(data):
         print("Fail to reject null: data may be lognormal.")
     else:
         print("Reject null: data is not lognormal.")
+
+
+#############################################################################
+#################### European Black-Scholes & MC Pricing ####################
+#############################################################################
+
+def price_call_bs(S, K=90, tau=1.0, r=0.05, vol=0.2):
+    """
+    Black-Scholes European call price (scalar inputs).
+    """
+    if tau <= 0:
+        return max(0.0, S - K)
+    v = vol * np.sqrt(tau)
+    d1 = (np.log(S/K) + (r + 0.5*vol*vol)*tau) / v
+    d2 = d1 - v
+    from scipy.stats import norm as _norm
+    return float(S * _norm.cdf(d1) - K * np.exp(-r*tau) * _norm.cdf(d2))
+
+
+def price_put_bs(S, K=90, tau=1.0, r=0.05, vol=0.2):
+    """
+    Black-Scholes European put price (scalar inputs, via put-call parity).
+    """
+    return price_call_bs(S, K, tau, r, vol) - S + K * np.exp(-r * tau)
+
+
+def price_call_mc(paths, K, T, r=None):
+    """
+    Monte Carlo European call pricing.
+    Returns dict with price, std_err, ci_95, n_paths.
+    """
+    n_paths = paths.shape[0]
+    disc = np.exp(-r * T)
+    Y = disc * np.maximum(paths[:, -1] - K, 0.0)
+    price = Y.mean()
+    std_err = Y.std(ddof=1) / np.sqrt(n_paths)
+    ci95 = (price - 1.96*std_err, price + 1.96*std_err)
+    return {
+        'price': price,
+        'std_err': std_err,
+        'ci_95': ci95,
+        'n_paths': n_paths
+    }
+
+
+def price_put_mc(paths, K, T, r=None):
+    """
+    Monte Carlo European put pricing.
+    Returns dict with price, std_err, ci_95, n_paths.
+    """
+    n_paths = paths.shape[0]
+    disc = np.exp(-r * T)
+    Y = disc * np.maximum(K - paths[:, -1], 0.0)
+    price = Y.mean()
+    std_err = Y.std(ddof=1) / np.sqrt(n_paths)
+    ci95 = (price - 1.96*std_err, price + 1.96*std_err)
+    return {
+        'price': price,
+        'std_err': std_err,
+        'ci_95': ci95,
+        'n_paths': n_paths
+    }
 
 
 #############################################################################
@@ -234,7 +300,7 @@ def rk4_integrate(rhs, tau, n_steps_ode, n_phi):
 
     dt = tau / n_steps_ode
 
-    # Pre-allocate RK4 workspace (reused every iteration)
+    # Pre-allocate RK4 workspace 
     k1 = np.empty_like(Y)
     k2 = np.empty_like(Y)
     k3 = np.empty_like(Y)
@@ -334,7 +400,7 @@ class LLHPrecompute:
 
 @dataclass
 class ImprovedSteinStein:
-    """Simulator for the four-step price algorithm."""
+    """LLH stochastic volatility model: Monte Carlo simulation and European pricing."""
     r: float
     sigma0: float
     theta0: float
@@ -439,22 +505,20 @@ class ImprovedSteinStein:
         return call - S + K * np.exp(-self.r * tau)
 
 
-    # ---------- MC European pricing (convenience wrappers) ----------
+    # ---------- MC European pricing ----------
 
     def price_call_mc(self, sim_out, K):
         """European call price via Monte Carlo on simulated paths."""
-        import amOptPricer as aop
         T = sim_out['dt'] * (sim_out['S'].shape[1] - 1)
-        return aop.price_call_mc(sim_out['S'], K=K, T=T, r=self.r)
+        return price_call_mc(sim_out['S'], K=K, T=T, r=self.r)
 
     def price_put_mc(self, sim_out, K):
         """European put price via Monte Carlo on simulated paths."""
-        import amOptPricer as aop
         T = sim_out['dt'] * (sim_out['S'].shape[1] - 1)
-        return aop.price_put_mc(sim_out['S'], K=K, T=T, r=self.r)
+        return price_put_mc(sim_out['S'], K=K, T=T, r=self.r)
 
 
-    # ---------- American pricing (convenience wrapper) ----------
+    # ---------- American pricing (delegates to amOptPricer) ----------
 
     def price_american_put(self, sim_out, K, basis_order=3,
                            use_cv=True, improved=True, ridge=0.0,
@@ -487,9 +551,6 @@ def european_prices(model, S0=100.0, K=90.0, tau=1.0,
     """
     Compute European call and put prices under the LLH formula and via Monte Carlo.
     """
-    # Local import to avoid circular dependency
-    import amOptPricer as aop
-
     res = model.simulate_prices(S0=S0, T=tau, n_steps_mc=n_steps_mc, n_paths=n_paths)
 
     llh_call = model.price_call_llh(S=S0, K=K, tau=tau,
@@ -499,8 +560,8 @@ def european_prices(model, S0=100.0, K=90.0, tau=1.0,
                                    vol=model.sigma0, theta=model.theta0,
                                    phi_max=phi_max, n_phi=n_phi, n_steps_ode=n_steps_ode).item()
 
-    res_mc_call = aop.price_call_mc(res['S'], K=K, T=tau, r=model.r)
-    res_mc_put  = aop.price_put_mc(res['S'],  K=K, T=tau, r=model.r)
+    res_mc_call = price_call_mc(res['S'], K=K, T=tau, r=model.r)
+    res_mc_put  = price_put_mc(res['S'],  K=K, T=tau, r=model.r)
 
     return {
         'llh_call':   llh_call,

@@ -43,12 +43,13 @@ Reference parameters from Lin-Lin-He:
 
 ```
 src/
-  priceModels.py        # LLH simulation + European pricing (optimized: in-place RK4, pre-stacked coeffs)
-  amOptPricer.py        # LSM + Rasmussen control variates (optimized: batched regression, ITM-only European pricing)
+  priceModels.py        # LLH simulation + European pricing (ODE/quadrature + BS/MC)
+  amOptPricer.py        # LSM + Rasmussen control variates (re-exports European pricing for compat)
   calibrate.py          # LLH calibration to market options (DE + L-BFGS-B)
   reporting.py          # Notebook presentation helpers
-  generate_plots.py     # Plot generation for reports
-  *_v0.py               # Archived pre-optimization originals (gitignored)
+  generate_plots.py     # Plot generation for European and American pricing reports
+  timing_analysis.py    # Empirical timing analysis of LSM+CV-LLH (scaling, stage breakdown)
+  *_v0.py               # Archived originals (gitignored)
 
 notebooks/
   european_pricing.ipynb      # European price validation + S&Z Table 2 comparison
@@ -61,6 +62,8 @@ reports/
   llh-formula.pdf             # Theoretical derivation of the European price formula
   llh-formula-report.pdf      # Extended report with European pricing results
   pricing-project.pdf         # Project report
+  american_pricing_report.tex # American pricing report (compilable LaTeX)
+  american_pricing_report.pdf # Compiled American pricing report
 ```
 
 ---

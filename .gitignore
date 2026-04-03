@@ -12,6 +12,10 @@ plan_calibration.md
 # Demo notebook
 notebooks/demo.ipynb
 
+# Archived v0 notebooks
+notebooks/european_pricing_v0.ipynb
+notebooks/american_pricing_v0.ipynb
+
 # Python
 __pycache__/
 *.pyc

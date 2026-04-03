@@ -1,67 +1,10 @@
 from dataclasses import dataclass
 import numpy as np
-from scipy.stats import norm
 from scipy.special import ndtr
 from numpy.polynomial.laguerre import lagvander
 
-
-#############################################################################
-########################### European Pricer #################################
-#############################################################################
-def price_call_bs(S, K=90, tau=1.0, r=0.05, vol=0.2):
-    """
-    Black-Scholes European call price using the Black-Scholes formula.
-    """
-    if tau <= 0:
-        return max(0.0, S - K)
-    v = vol * np.sqrt(tau)
-    d1 = (np.log(S/K) + (r + 0.5*vol*vol)*tau) / v
-    d2 = d1 - v
-    return float(S * norm.cdf(d1) - K * np.exp(-r*tau) * norm.cdf(d2))
-
-def price_call_mc(paths, K, T, r=None):
-    """
-    Monte Carlo European call pricing
-    K: strike
-    r: discount rate (or taken from simulator if None)
-    Returns dict with price, std_err, ci_95, n_paths.
-    """
-    n_paths = paths.shape[0]
-    disc = np.exp(-r * T)
-
-    Y = disc * np.maximum(paths[:, -1] - K, 0.0)
-
-    price = Y.mean()
-    std_err = Y.std(ddof=1) / np.sqrt(n_paths)
-    ci95 = (price - 1.96*std_err, price + 1.96*std_err)
-
-    return {
-        'price': price,
-        'std_err': std_err,
-        'ci_95': ci95,
-        'n_paths': n_paths
-    }
-
-
-def price_put_mc(paths, K, T, r=None):
-    """
-    Monte Carlo European put pricing.
-    K: strike
-    r: discount rate
-    Returns dict with price, std_err, ci_95, n_paths.
-    """
-    n_paths = paths.shape[0]
-    disc = np.exp(-r * T)
-    Y = disc * np.maximum(K - paths[:, -1], 0.0)
-    price = Y.mean()
-    std_err = Y.std(ddof=1) / np.sqrt(n_paths)
-    ci95 = (price - 1.96*std_err, price + 1.96*std_err)
-    return {
-        'price': price,
-        'std_err': std_err,
-        'ci_95': ci95,
-        'n_paths': n_paths
-    }
+# Re-exports for backward compatibility (canonical home: priceModels)
+from priceModels import price_call_mc, price_put_mc, price_call_bs  # noqa: F401
 
 
 #############################################################################
@@ -228,13 +171,17 @@ def price_american_put_lsm_llh(model, sim_out, K, basis_order=3,
     """
     LSM American put pricer with optional Rasmussen control variates.
 
+    Implements the LSM-CV algorithm from report §3.3.1, based on West (2012) §3.1.2
+    and Rasmussen (2005). When use_cv=True, four regressions sharing the same Laguerre
+    basis yield a per-path optimal CV coefficient (functional form theta).
+
     Parameters
     ----------
     model        : ImprovedSteinStein instance
     sim_out      : dict from model.simulate_prices() — keys 'S', 'sigma_hat', 'B', 'dt'
     K            : strike
     use_cv       : if False, runs plain LSM with European exercise floor
-    improved     : if True and use_cv=True, adds global CV estimator
+    improved     : if True and use_cv=True, adds global CV estimator (West 2012 §3.1.2)
     euro_method  : 'llh' | 'bs' | 'mc1' — European pricing for CV (only when use_cv=True)
     floor_method : 'bs' | 'llh' — European floor for exercise safety when use_cv=False.
                    Default 'bs' is fast; 'llh' is accurate but ~100x slower.
@@ -245,6 +192,21 @@ def price_american_put_lsm_llh(model, sim_out, K, basis_order=3,
     dict:
       price, std_err, ci_95, n_paths
       + price_imp, std_err_imp, ci_95_imp  (when use_cv=True and improved=True)
+
+    Notation (report §3.3.1 / West 2012)
+    -------------------------------------
+    CF      = EE  in West  — discounted eventual exercise (cash flow)
+    CV      = EEE in West  — European eventual exercise (control variate)
+    Ej      = E   in West  — European option value at node (S_j, tau_j)
+    tildeV  = Ṽ_j          — regression of CF on Laguerre basis (continuation value)
+    tildeV_E= Ṽ^E_j        — regression of CV on basis
+    aux_ECV = CV^{aux1}     — regression of E_j·CV on basis
+    aux_CV2 = CV^{aux2}     — regression of CV² on basis
+    theta_cv= θ̂^i_j        — per-path functional CV coefficient
+    TV      = TV            — test value: tildeV + theta_cv·(tildeV_E - E_j)
+
+    Regressions are fitted on ITM paths only (I_j > 0) per Longstaff-Schwartz,
+    but predicted for all paths.
 
     Notes
     -----
@@ -263,18 +225,17 @@ def price_american_put_lsm_llh(model, sim_out, K, basis_order=3,
     n_steps = n_cols - 1
     disc = np.exp(-r * dt)
 
-    # theta_t aligned with S (needed when LLH European pricing is used in any mode)
+    # Step 1: Compute theta_t, needed if LLH is used for CV or floor (as it enters the PDE coefficients).
     need_theta = (use_cv and euro_method == 'llh') or (not use_cv and floor_method == 'llh')
     theta_lr = _theta_lr_grid(B, model.theta0, model.lam, model.eta, dt, n_steps, n_paths) if need_theta else None
 
-    # Initialize at maturity t_N
-    CF = np.maximum(K - S[:, -1], 0.0)
-    CV = CF.copy() if use_cv else None
+    # Step 2: Initialize at maturity t_N 
+    CF = np.maximum(K - S[:, -1], 0.0)   # EE in West — eventual exercise
+    CV = CF.copy() if use_cv else None    # EEE in West — European eventual exercise
 
-    CF_1 = CV_1 = E_1 = None
+    CF_1 = CV_1 = E_1 = None  # saved at j=1 for the final estimators
 
     # Precompute all unique tau values (when LLH European pricing is used in any mode)
-    # Use integer step count as key to avoid float-equality fragility
     tau_cache = {}
     if (use_cv and euro_method == 'llh') or (not use_cv and floor_method == 'llh'):
         for j in range(1, n_steps):
@@ -285,13 +246,12 @@ def price_american_put_lsm_llh(model, sim_out, K, basis_order=3,
                     n_steps_ode=n_steps_rk4, eps0=eps0
                 )
 
-    # Pre-allocate loop buffers (reused each iteration)
     _Ij = np.empty(n_paths, dtype=float)
     _x  = np.empty(n_paths, dtype=float)
 
-    # Backward loop: j = N-1,...,1
+    # Step 3: Backward loop j = N-1,...,1 
     for j in range(n_steps - 1, 0, -1):
-        # (i) discount one step
+        # Step 3(i): discount one step
         CF *= disc
         if use_cv:
             CV *= disc
@@ -302,7 +262,7 @@ def price_american_put_lsm_llh(model, sim_out, K, basis_order=3,
         thetaj = theta_lr[:, j] if theta_lr is not None else None
         tauj = (n_steps - j) * dt
 
-        # Immediate exercise for PUT (in-place)
+        # Intrinsic value I_j = max(K - S_j, 0) for PUT
         np.subtract(K, Sj, out=_Ij)
         np.maximum(_Ij, 0.0, out=_Ij)
         Ij = _Ij
@@ -313,12 +273,13 @@ def price_american_put_lsm_llh(model, sim_out, K, basis_order=3,
         itm = (Ij > 0.0)
 
         if use_cv:
-            # European PUT via selected method
+            # Step 3(ii): European PUT E_j via selected method
             steps_remaining = n_steps - j
             pre_j = tau_cache.get(steps_remaining) if euro_method == 'llh' else None
 
-            # For j > 1, only compute Ej for ITM paths (OTM never exercise).
-            # At j == 1, compute for ALL paths (needed for E_1 in improved estimator).
+            # Optimization: for j > 1, only compute E_j for ITM paths (OTM never
+            # exercise since I_j=0). At j==1, compute for ALL paths (needed for
+            # E_1 in the improved estimator).
             if j == 1 or euro_method == 'mc1':
                 Ej = _euro_put_slice(euro_method, model, sim_out, j, Sj, volj, thetaj, tauj, K, llh_pre=pre_j)
             else:
@@ -330,7 +291,11 @@ def price_american_put_lsm_llh(model, sim_out, K, basis_order=3,
                         Sj[itm], volj[itm], thetaj_itm, tauj, K, llh_pre=pre_j
                     )
 
-            # 4 regressions with shared factorization
+            # Step 3(ii-iii): 4 regressions with shared Gram matrix factorization.
+            #   col 0: CF      → tildeV   (Ṽ_j  — continuation value)
+            #   col 1: CV      → tildeV_E (Ṽ^E_j — European continuation)
+            #   col 2: E_j·CV  → aux_ECV  (CV^{aux1} in report)
+            #   col 3: CV²     → aux_CV2  (CV^{aux2} in report)
             if itm.any():
                 Phi = Phi_all[itm, :]
                 CF_itm = CF[itm]
@@ -338,27 +303,30 @@ def price_american_put_lsm_llh(model, sim_out, K, basis_order=3,
                 Ej_itm = Ej[itm]
                 Y_mat = np.column_stack([CF_itm, CV_itm, Ej_itm * CV_itm, CV_itm**2])
                 preds = _ols_fit_predict_multi(Phi, Y_mat, Phi_all, ridge=ridge)
-                tildeV, tildeVE, aux1, aux2 = preds[:, 0], preds[:, 1], preds[:, 2], preds[:, 3]
+                tildeV, tildeV_E, aux_ECV, aux_CV2 = preds[:, 0], preds[:, 1], preds[:, 2], preds[:, 3]
             else:
-                tildeV  = np.zeros_like(Sj)
-                tildeVE = np.zeros_like(Sj)
-                aux1    = np.zeros_like(Sj)
-                aux2    = np.ones_like(Sj)
+                tildeV   = np.zeros_like(Sj)
+                tildeV_E = np.zeros_like(Sj)
+                aux_ECV  = np.zeros_like(Sj)
+                aux_CV2  = np.ones_like(Sj)
 
-            # Rasmussen CV test value
-            denom = aux2 - tildeVE**2
+            # Step 3(iii): per-path CV coefficient θ̂^i
+            #   θ̂^i = -(aux_ECV - tildeV·tildeV_E) / (aux_CV2 - tildeV_E²)
+            denom = aux_CV2 - tildeV_E**2
             theta_cv = np.zeros_like(Sj)
             ok = np.abs(denom) > 1e-12
-            theta_cv[ok] = -(aux1[ok] - tildeV[ok] * tildeVE[ok]) / denom[ok]
-            TV = tildeV + theta_cv * (tildeVE - Ej)
+            theta_cv[ok] = -(aux_ECV[ok] - tildeV[ok] * tildeV_E[ok]) / denom[ok]
 
-            # Exercise decision with European floor
+            # Test value: TV = Ṽ_j + θ̂^i·(Ṽ^E_j - E_j)
+            TV = tildeV + theta_cv * (tildeV_E - Ej)
+
+            # Step 3(iii): exercise if I_j > max(E_j, TV); update CF=I, CV=E
             ex_mask = Ij > np.maximum(Ej, TV)
             if np.any(ex_mask):
                 CF[ex_mask] = Ij[ex_mask]
                 CV[ex_mask] = Ej[ex_mask]
 
-            # Save j==1 slice for final estimator
+            # Save j==1 vectors for final estimators (Steps 4-5)
             if j == 1:
                 CF_1 = CF.copy()
                 CV_1 = CV.copy()
@@ -389,7 +357,8 @@ def price_american_put_lsm_llh(model, sim_out, K, basis_order=3,
             if j == 1:
                 CF_1 = CF.copy()
 
-    # Time-0 estimators
+    # Step 4: Base estimator
+    # max(I_0, (1/N) Σ e^{-r t_1} CF_1^i)
     base_samples = disc * CF_1
     I0 = max(K - S[0, 0], 0.0)
     price = max(I0, float(base_samples.mean()))
@@ -403,7 +372,7 @@ def price_american_put_lsm_llh(model, sim_out, K, basis_order=3,
         'n_paths': int(n_paths)
     }
 
-    # Improved estimator only when CV is active
+    # Step 5: Improved estimator (Rasmussen 2002 / West 2012) 
     if use_cv and improved:
         X = CV_1 - CV_1.mean()
         Y = CF_1 - CF_1.mean()

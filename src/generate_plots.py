@@ -1,5 +1,5 @@
 """
-Publication-quality PNG plots for European pricing under the LLH model.
+Publication-quality PNG plots for European and American pricing under the LLH model.
 
 Usage (from project root):
     cd src && python generate_plots.py           # all param sets
@@ -135,7 +135,7 @@ def plot_mc_convergence(model, label, pset_name,
                     sigma0=model.sigma0, theta0=model.theta0,
                     lam=model.lam, eta=model.eta, seed=base_seed + s)
                 res = m.simulate_prices(S0=S0, T=tau, n_steps_mc=n_steps_mc, n_paths=np_val)
-                mc_prices.append(aop.price_call_mc(res['S'], K=K, T=tau, r=model.r)['price'])
+                mc_prices.append(pm.price_call_mc(res['S'], K=K, T=tau, r=model.r)['price'])
 
             mc_prices = np.array(mc_prices)
             mean_p = mc_prices.mean()
@@ -187,7 +187,7 @@ def _compute_mc_llh_grid(model,
             llh_p = model.price_call_llh(
                 S=S0, K=K, tau=tau, vol=model.sigma0, theta=model.theta0, pre=pre
             ).item()
-            mc_res = aop.price_call_mc(res['S'], K=K, T=tau, r=model.r)
+            mc_res = pm.price_call_mc(res['S'], K=K, T=tau, r=model.r)
             results[(S0, K)] = {
                 'llh': llh_p,
                 'mc': mc_res['price'],
@@ -420,6 +420,56 @@ HORIZON_CONFIGS = {
     '1y': {'T': 1.0,  'n_steps_mc': 52,  'label': '1-year'},
 }
 
+# ── American pricing defaults ──
+AM_K = 100.0
+AM_S0_GRID = (85.0, 90.0, 100.0, 110.0, 115.0)
+AM_MONEYNESS = ('Deep ITM', 'ITM', 'ATM', 'OTM', 'Deep OTM')
+AM_N_PATHS = 10_000
+AM_LLH_PARAMS = dict(phi_max=300.0, n_phi=513, n_steps_rk4=128)
+
+
+def _compute_american_grid(pset_name, seed=42):
+    """
+    Compute American put prices across moneyness and horizons for one param set.
+
+    Returns dict {horizon_key: list of row dicts} with keys matching
+    the DataFrame columns produced by reporting.american_put_comparison.
+    """
+    results = {}
+    for hkey, hcfg in HORIZON_CONFIGS.items():
+        T, n_steps_mc = hcfg['T'], hcfg['n_steps_mc']
+        rows = []
+        for S0, mlabel in zip(AM_S0_GRID, AM_MONEYNESS):
+            model = _make_model(pset_name, seed=seed)
+            sim = model.simulate_prices(S0=S0, T=T, n_steps_mc=n_steps_mc,
+                                        n_paths=AM_N_PATHS)
+
+            mc_put = pm.price_put_mc(sim['S'], K=AM_K, T=T, r=model.r)
+            res_plain = aop.price_american_put_lsm_llh(
+                model, sim, AM_K, use_cv=False, ridge=1e-5)
+            res_bs = aop.price_american_put_lsm_llh(
+                model, sim, AM_K, use_cv=True, euro_method='bs', ridge=1e-5)
+            res_llh = aop.price_american_put_lsm_llh(
+                model, sim, AM_K, use_cv=True, euro_method='llh', ridge=1e-5,
+                **AM_LLH_PARAMS)
+
+            rows.append({
+                'Moneyness': mlabel, 'S0': S0,
+                'MC_put_price': mc_put['price'], 'MC_put_se': mc_put['std_err'],
+                'Plain_price': res_plain['price'],
+                'Plain_se': res_plain['std_err'],
+                'BS_price': res_bs.get('price_imp', res_bs['price']),
+                'BS_se': res_bs.get('std_err_imp', res_bs['std_err']),
+                'BS_VR': (res_plain['std_err'] / res_bs.get('std_err_imp', res_bs['std_err']))**2
+                         if res_bs.get('std_err_imp', res_bs['std_err']) > 0 else np.nan,
+                'LLH_price': res_llh.get('price_imp', res_llh['price']),
+                'LLH_se': res_llh.get('std_err_imp', res_llh['std_err']),
+                'LLH_VR': (res_plain['std_err'] / res_llh.get('std_err_imp', res_llh['std_err']))**2
+                          if res_llh.get('std_err_imp', res_llh['std_err']) > 0 else np.nan,
+            })
+        results[hkey] = rows
+    return results
+
 
 def plot_american_put_panels(pset_name, label, horizon_key,
                              S0_values=(85.0, 90.0, 100.0, 110.0, 115.0),
@@ -428,22 +478,24 @@ def plot_american_put_panels(pset_name, label, horizon_key,
                              phi_max=300.0, n_phi=513, n_steps_rk4=128):
     """
     Two-panel figure: American put prices across S0 for K=80 and K=120.
-    Each panel has 3 lines: MC Put (dashed), Plain LSM, CV-LLH with SE error bars.
+    Each panel has 4 lines: MC Put (dashed), Plain LSM, CV-BS, CV-LLH with SE error bars.
     One figure per (param_set, maturity).
     """
     hcfg = HORIZON_CONFIGS[horizon_key]
     T, n_steps_mc = hcfg['T'], hcfg['n_steps_mc']
 
-    # Collect data for each (S0, K)
-    data = {}  # (S0, K) -> {mc_put, lsm_price, lsm_se, llh_price, llh_se}
+    data = {}
     for S0 in S0_values:
         model = _make_model(pset_name, seed=seed)
         sim = model.simulate_prices(S0=S0, T=T, n_steps_mc=n_steps_mc, n_paths=n_paths)
         for K in K_values:
-            mc_put = aop.price_put_mc(sim['S'], K=K, T=T, r=model.r)['price']
+            mc_put = pm.price_put_mc(sim['S'], K=K, T=T, r=model.r)['price']
 
             res_plain = aop.price_american_put_lsm_llh(
                 model, sim, K, use_cv=False, ridge=1e-5)
+
+            res_bs = aop.price_american_put_lsm_llh(
+                model, sim, K, use_cv=True, euro_method='bs', ridge=1e-5)
 
             res_llh = aop.price_american_put_lsm_llh(
                 model, sim, K, use_cv=True, euro_method='llh', ridge=1e-5,
@@ -453,6 +505,8 @@ def plot_american_put_panels(pset_name, label, horizon_key,
                 'mc_put': mc_put,
                 'lsm_price': res_plain['price'],
                 'lsm_se': res_plain['std_err'],
+                'bs_price': res_bs.get('price_imp', res_bs['price']),
+                'bs_se': res_bs.get('std_err_imp', res_bs['std_err']),
                 'llh_price': res_llh.get('price_imp', res_llh['price']),
                 'llh_se': res_llh.get('std_err_imp', res_llh['std_err']),
             }
@@ -466,28 +520,299 @@ def plot_american_put_panels(pset_name, label, horizon_key,
         mc = [data[(S0, K)]['mc_put'] for S0 in S0_values]
         lsm = [data[(S0, K)]['lsm_price'] for S0 in S0_values]
         lsm_se = [1.96 * data[(S0, K)]['lsm_se'] for S0 in S0_values]
+        bs = [data[(S0, K)]['bs_price'] for S0 in S0_values]
+        bs_se = [1.96 * data[(S0, K)]['bs_se'] for S0 in S0_values]
         llh = [data[(S0, K)]['llh_price'] for S0 in S0_values]
         llh_se = [1.96 * data[(S0, K)]['llh_se'] for S0 in S0_values]
 
         ax.plot(S0_values, mc, 's--', color='#2ca02c', label='Euro Put (MC)')
         ax.errorbar(S0_values, lsm, yerr=lsm_se,
                     fmt='o-', color='#1f77b4', capsize=4, label='Plain LSM')
+        ax.errorbar(S0_values, bs, yerr=bs_se,
+                    fmt='D-', color='#ff7f0e', capsize=4, label='LSM + CV-BS')
         ax.errorbar(S0_values, llh, yerr=llh_se,
                     fmt='^-', color='#d62728', capsize=4, label='LSM + CV-LLH')
 
         ax.set_xlabel('$S_0$')
-        ax.set_title(f'$K = {K:.0f}$')
+        ax.set_title(_k_panel_label(K, S0_values))
         ax.legend(fontsize=9)
 
         if i == 0:
             ax.set_ylabel('Put price')
 
     fig.suptitle(
-        f'American put prices: MC Put vs LSM vs CV-LLH\n'
+        f'American put prices: MC Put vs LSM vs CV-BS vs CV-LLH\n'
         f'{label} params, {hcfg["label"]} horizon',
         fontsize=13, y=1.03)
     fig.tight_layout()
     fname = f'fig5_american_put_{pset_name}_{horizon_key}.png'
+    _savefig(fig, fname)
+    print(f"  Saved {fname}")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Plot 6: American Put Prices vs Spot (K=100, both horizons)
+# ═══════════════════════════════════════════════════════════════════════
+
+def plot_american_prices_vs_spot(pset_name, label, am_grid):
+    """
+    1×2 figure (1-month, 1-year): MC Put, Plain LSM, CV-BS, CV-LLH vs S0 at K=100.
+    """
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharey=False)
+
+    for ax, (hkey, rows) in zip(axes, am_grid.items()):
+        hlbl = HORIZON_CONFIGS[hkey]['label']
+        s0 = [r['S0'] for r in rows]
+        ax.plot(s0, [r['MC_put_price'] for r in rows],
+                's--', color='#2ca02c', label='Euro Put (MC)')
+        ax.errorbar(s0, [r['Plain_price'] for r in rows],
+                    yerr=[1.96 * r['Plain_se'] for r in rows],
+                    fmt='o-', color='#1f77b4', capsize=4, label='Plain LSM')
+        ax.errorbar(s0, [r['BS_price'] for r in rows],
+                    yerr=[1.96 * r['BS_se'] for r in rows],
+                    fmt='D-', color='#ff7f0e', capsize=4, label='LSM + CV-BS')
+        ax.errorbar(s0, [r['LLH_price'] for r in rows],
+                    yerr=[1.96 * r['LLH_se'] for r in rows],
+                    fmt='^-', color='#d62728', capsize=4, label='LSM + CV-LLH')
+        ax.set_xlabel('$S_0$')
+        ax.set_title(hlbl)
+        ax.legend(fontsize=9)
+
+    axes[0].set_ylabel('Put price')
+    fig.suptitle(
+        f'American put prices vs spot ($K = {AM_K:.0f}$)\n{label} params',
+        fontsize=13, y=1.03)
+    fig.tight_layout()
+    fname = f'fig6_american_prices_{pset_name}.png'
+    _savefig(fig, fname)
+    print(f"  Saved {fname}")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Plot 7: Variance Reduction Ratios
+# ═══════════════════════════════════════════════════════════════════════
+
+def plot_vr_ratios(pset_name, label, am_grid):
+    """
+    1×2 figure by horizon: grouped bars comparing CV-BS and CV-LLH VR
+    across moneyness levels within each panel.
+    """
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharey=True)
+    x = np.arange(len(AM_MONEYNESS))
+    bar_w = 0.35
+    horizon_keys = list(am_grid.keys())
+    cv_colors = ['#ff7f0e', '#d62728']
+    cv_labels = ['CV-BS', 'CV-LLH']
+    vr_cols = ['BS_VR', 'LLH_VR']
+
+    for ax, hkey in zip(axes, horizon_keys):
+        hlbl = HORIZON_CONFIGS[hkey]['label']
+        rows = am_grid[hkey]
+        for k, (vr_col, cvlbl, color) in enumerate(zip(vr_cols, cv_labels, cv_colors)):
+            vals = [r[vr_col] for r in rows]
+            ax.bar(x + (k - 0.5) * bar_w, vals, bar_w,
+                   label=cvlbl, color=color, alpha=0.85)
+        ax.set_xticks(x)
+        ax.set_xticklabels(AM_MONEYNESS, rotation=30, ha='right', fontsize=9)
+        ax.set_title(f'{hlbl} horizon')
+        ax.axhline(1, color='gray', ls='--', lw=0.8, alpha=0.6)
+        ax.legend(fontsize=9)
+
+    axes[0].set_ylabel('VR Ratio')
+    fig.suptitle(
+        f'Variance reduction ratios ($K = {AM_K:.0f}$)\n{label} params',
+        fontsize=13, y=1.03)
+    fig.tight_layout()
+    fname = f'fig7_vr_ratios_{pset_name}.png'
+    _savefig(fig, fname)
+    print(f"  Saved {fname}")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Plot 8: Early Exercise Premium
+# ═══════════════════════════════════════════════════════════════════════
+
+def plot_eep_bars(pset_name, label, am_grid):
+    """
+    1×2 figure (1-month, 1-year): grouped bars of EEP (%) by method across moneyness.
+    """
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharey=True)
+    x = np.arange(len(AM_MONEYNESS))
+    bar_w = 0.25
+    methods = [('Plain_price', 'Plain LSM', '#1f77b4'),
+               ('BS_price',    'CV-BS',     '#ff7f0e'),
+               ('LLH_price',   'CV-LLH',    '#d62728')]
+
+    for ax, (hkey, rows) in zip(axes, am_grid.items()):
+        hlbl = HORIZON_CONFIGS[hkey]['label']
+        for k, (price_key, mlabel, color) in enumerate(methods):
+            eep_pct = []
+            for r in rows:
+                mc = r['MC_put_price']
+                am = r[price_key]
+                eep_pct.append((am - mc) / mc * 100 if mc > 0.01 else np.nan)
+            offset = (k - 1) * bar_w
+            ax.bar(x + offset, eep_pct, bar_w, label=mlabel, color=color, alpha=0.85)
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(AM_MONEYNESS, rotation=30, ha='right', fontsize=9)
+        ax.set_title(hlbl)
+        ax.axhline(0, color='black', lw=0.5, ls='--')
+        ax.legend(fontsize=9)
+
+    axes[0].set_ylabel('EEP (%)')
+    fig.suptitle(
+        f'Early exercise premium ($K = {AM_K:.0f}$)\n{label} params',
+        fontsize=13, y=1.03)
+    fig.tight_layout()
+    fname = f'fig8_eep_{pset_name}.png'
+    _savefig(fig, fname)
+    print(f"  Saved {fname}")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Plot 9: Black-Scholes Limit (CV-BS as near-perfect CV)
+# ═══════════════════════════════════════════════════════════════════════
+
+def plot_american_bs_limit(n_paths=10_000, seed=42):
+    """
+    Single figure: MC Put vs Plain LSM vs CV-BS under BS limit (1-year horizon).
+    Demonstrates CV-BS as a near-perfect control variate when the model is GBM.
+    """
+    model = pm.ImprovedSteinStein(
+        r=0.05, rho=0.0, kappa=0.0, nu=0.0,
+        sigma0=0.2, theta0=0.0, lam=0.0, eta=0.0, seed=seed)
+
+    T, n_steps_mc = 1.0, 52
+    s0_list, mc_list, lsm_list, lsm_se_list = [], [], [], []
+    bs_list, bs_se_list = [], []
+
+    for S0 in AM_S0_GRID:
+        sim = model.simulate_prices(S0=S0, T=T, n_steps_mc=n_steps_mc, n_paths=n_paths)
+        mc_put = pm.price_put_mc(sim['S'], K=AM_K, T=T, r=model.r)
+        res_plain = aop.price_american_put_lsm_llh(model, sim, AM_K,
+                                                    use_cv=False, ridge=1e-5)
+        res_bs = aop.price_american_put_lsm_llh(model, sim, AM_K,
+                                                  use_cv=True, euro_method='bs',
+                                                  ridge=1e-5)
+        s0_list.append(S0)
+        mc_list.append(mc_put['price'])
+        lsm_list.append(res_plain['price'])
+        lsm_se_list.append(res_plain['std_err'])
+        bs_list.append(res_bs.get('price_imp', res_bs['price']))
+        bs_se_list.append(res_bs.get('std_err_imp', res_bs['std_err']))
+
+    fig, ax = plt.subplots(figsize=(7, 5))
+    ax.plot(s0_list, mc_list, 's--', color='#2ca02c', label='Euro Put (MC)')
+    ax.errorbar(s0_list, lsm_list, yerr=[1.96 * se for se in lsm_se_list],
+                fmt='o-', color='#1f77b4', capsize=4, label='Plain LSM')
+    ax.errorbar(s0_list, bs_list, yerr=[1.96 * se for se in bs_se_list],
+                fmt='^-', color='#d62728', capsize=4, label='LSM + CV-BS')
+    ax.set_xlabel('$S_0$')
+    ax.set_ylabel('Put price')
+    ax.set_title(
+        f'American put prices — Black-Scholes limit ($T = 1$ yr)\n'
+        r'$r=0.05,\;\sigma_0=0.2,\;\kappa=\nu=\lambda=\eta=\rho=0$',
+        fontsize=13)
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    _savefig(fig, 'fig9_american_put_bs_limit.png')
+    print("  Saved fig9_american_put_bs_limit.png")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Plot 10: MC Path Convergence (Price and EEP vs N)
+# ═══════════════════════════════════════════════════════════════════════
+
+def plot_mc_path_convergence(pset_name, label,
+                             S0_cases=((90.0, 'ITM'), (100.0, 'ATM')),
+                             K=100.0, T=1.0, n_steps_mc=52,
+                             N_values=(10_000, 50_000, 100_000, 250_000, 500_000),
+                             base_seed=100):
+    """
+    Two figures (price convergence + EEP convergence) showing the effect of
+    increasing MC paths on Plain LSM and CV-BS estimators.
+    """
+    # Collect data
+    data = {s0_label: [] for _, s0_label in S0_cases}
+    for S0, s0_label in S0_cases:
+        for n in N_values:
+            model = _make_model(pset_name, seed=base_seed)
+            sim = model.simulate_prices(S0=S0, T=T, n_steps_mc=n_steps_mc, n_paths=n)
+            mc_put = pm.price_put_mc(sim['S'], K=K, T=T, r=model.r)['price']
+            res_plain = aop.price_american_put_lsm_llh(
+                model, sim, K, use_cv=False, ridge=1e-5)
+            res_bs = aop.price_american_put_lsm_llh(
+                model, sim, K, use_cv=True, euro_method='bs', ridge=1e-5)
+            data[s0_label].append({
+                'N': n,
+                'mc_put': mc_put,
+                'plain_price': res_plain['price'],
+                'plain_se': res_plain['std_err'],
+                'bs_price': res_bs.get('price_imp', res_bs['price']),
+                'bs_se': res_bs.get('std_err_imp', res_bs['std_err']),
+            })
+            print(f"    {s0_label} N={n:>7}: Plain={res_plain['price']:.4f} "
+                  f"CV-BS={res_bs.get('price_imp', res_bs['price']):.4f}")
+
+    # --- Fig 10a: Price convergence ---
+    fig, axes = plt.subplots(1, len(S0_cases), figsize=(14, 5), sharey=False)
+    if len(S0_cases) == 1:
+        axes = [axes]
+
+    for ax, (S0, s0_label) in zip(axes, S0_cases):
+        rows = data[s0_label]
+        ns = [r['N'] for r in rows]
+        ax.errorbar(ns, [r['plain_price'] for r in rows],
+                    yerr=[1.96 * r['plain_se'] for r in rows],
+                    fmt='o-', color='#1f77b4', capsize=4, label='Plain LSM')
+        ax.errorbar(ns, [r['bs_price'] for r in rows],
+                    yerr=[1.96 * r['bs_se'] for r in rows],
+                    fmt='D-', color='#ff7f0e', capsize=4, label='CV-BS')
+        ax.set_xscale('log')
+        ax.set_xlabel('$N$ (paths)')
+        ax.set_title(f'$S_0={S0:.0f}$, $K={K:.0f}$ ({s0_label})')
+        ax.legend(fontsize=9)
+
+    axes[0].set_ylabel('American put price')
+    fig.suptitle(
+        f'American put price convergence with $N$\n'
+        f'{label} params, $K={K:.0f}$, 1-year horizon',
+        fontsize=13, y=1.03)
+    fig.tight_layout()
+    fname = f'fig10_price_convergence_{pset_name}.png'
+    _savefig(fig, fname)
+    print(f"  Saved {fname}")
+
+    # --- Fig 10b: EEP convergence ---
+    fig, axes = plt.subplots(1, len(S0_cases), figsize=(14, 5), sharey=False)
+    if len(S0_cases) == 1:
+        axes = [axes]
+
+    for ax, (S0, s0_label) in zip(axes, S0_cases):
+        rows = data[s0_label]
+        ns = [r['N'] for r in rows]
+        eep_plain = [100 * (r['plain_price'] - r['mc_put']) / r['mc_put']
+                     if r['mc_put'] > 0.01 else np.nan for r in rows]
+        eep_bs = [100 * (r['bs_price'] - r['mc_put']) / r['mc_put']
+                  if r['mc_put'] > 0.01 else np.nan for r in rows]
+
+        ax.plot(ns, eep_plain, 'o-', color='#1f77b4', label='Plain LSM')
+        ax.plot(ns, eep_bs, 'D-', color='#ff7f0e', label='CV-BS')
+        ax.set_xscale('log')
+        ax.set_xlabel('$N$ (paths)')
+        ax.set_title(f'$S_0={S0:.0f}$, $K={K:.0f}$ ({s0_label})')
+        ax.axhline(0, color='black', lw=0.5, ls='--')
+        ax.legend(fontsize=9)
+
+    axes[0].set_ylabel('EEP (%)')
+    fig.suptitle(
+        f'Early exercise premium convergence with $N$\n'
+        f'{label} params, $K={K:.0f}$, 1-year horizon',
+        fontsize=13, y=1.03)
+    fig.tight_layout()
+    fname = f'fig10_eep_convergence_{pset_name}.png'
     _savefig(fig, fname)
     print(f"  Saved {fname}")
 
@@ -527,6 +852,21 @@ def _run_param_set(pset_name):
         print(f"  Plot 5: American put panels ({hlbl})...")
         plot_american_put_panels(pset_name, label, hkey)
 
+    print("  Computing American pricing grid (K=100)...")
+    am_grid = _compute_american_grid(pset_name)
+
+    print("  Plot 6: American prices vs spot...")
+    plot_american_prices_vs_spot(pset_name, label, am_grid)
+
+    print("  Plot 7: Variance reduction ratios...")
+    plot_vr_ratios(pset_name, label, am_grid)
+
+    print("  Plot 8: Early exercise premium...")
+    plot_eep_bars(pset_name, label, am_grid)
+
+    print("  Plot 10: MC path convergence (price + EEP)...")
+    plot_mc_path_convergence(pset_name, label)
+
 
 def main():
     plt.rcParams.update(STYLE)
@@ -541,6 +881,9 @@ def main():
 
     for name in requested:
         _run_param_set(name)
+
+    print("\n  Plot 9: BS-limit American put...")
+    plot_american_bs_limit()
 
     print(f"\nAll plots saved to {os.path.abspath(OUTPUT_DIR)}")
 
