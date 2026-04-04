@@ -83,11 +83,20 @@ def _time_stages(n_paths, n_steps_mc, n_phi, n_steps_rk4, seed=SEED):
 
     t_backward = max(0, t_pricer - t_ode)
 
+    # 4. Plain LSM (reuse same sim)
+    t0 = time.perf_counter()
+    res_plain = aop.price_american_put_lsm_llh(
+        model, sim, K=K_STRIKE, use_cv=False, ridge=1e-5)
+    t_plain_backward = time.perf_counter() - t0
+
     return {
         'Simulation': t_sim,
         'ODE precomp': t_ode,
         'Backward loop': t_backward,
         'Total': t_sim + t_pricer,
+        'Plain_sim': t_sim,
+        'Plain_backward': t_plain_backward,
+        'Plain_total': t_sim + t_plain_backward,
         'price_imp': result.get('price_imp', result['price']),
         'std_err_imp': result.get('std_err_imp', result['std_err']),
     }
@@ -116,32 +125,50 @@ def _time_method(method, n_paths, n_steps_mc, seed=SEED, **kw):
 # ===================================================================
 
 def plot_stage_breakdown():
-    """Horizontal bar chart showing wall-time by algorithm stage."""
+    """Horizontal bar chart comparing Plain LSM and CV-LLH stage breakdown."""
     s = _time_stages(N_DEFAULT, M_DEFAULT, P_DEFAULT, K_RK4)
-    labels = ['Simulation', 'ODE precomputation',
-              'Backward loop\n(pricing + regression)']
-    sizes = [s['Simulation'], s['ODE precomp'], s['Backward loop']]
-    colors = ['#1f77b4', '#ff7f0e', '#d62728']
-    total = s['Total']
 
-    fig, ax = plt.subplots(figsize=(7, 3.5))
-    y = np.arange(len(labels))
+    # Two groups with a gap: Plain LSM (top), CV-LLH (bottom)
+    labels = [
+        'Plain LSM\nSimulation',
+        'Plain LSM\nBackward loop',
+        '',  # gap
+        'CV-LLH\nSimulation',
+        'CV-LLH\nODE precomputation',
+        'CV-LLH\nBackward loop',
+    ]
+    sizes = [
+        s['Plain_sim'], s['Plain_backward'],
+        0,
+        s['Simulation'], s['ODE precomp'], s['Backward loop'],
+    ]
+    colors = ['#1f77b4', '#d62728',
+              'white',
+              '#1f77b4', '#ff7f0e', '#d62728']
+    totals = [s['Plain_total'], s['Plain_total'],
+              0,
+              s['Total'], s['Total'], s['Total']]
+
+    fig, ax = plt.subplots(figsize=(9, 4.5))
+    y = np.array([0, 1, 2, 3, 4, 5], dtype=float)
     bars = ax.barh(y, sizes, color=colors, alpha=0.85, height=0.5)
 
-    for bar, val in zip(bars, sizes):
-        pct = 100 * val / total
-        ax.text(bar.get_width() + total * 0.01, bar.get_y() + bar.get_height() / 2,
-                f'{val:.2f}s ({pct:.0f}%)', va='center', fontsize=10)
+    max_val = s['Total']
+    for bar, val, tot in zip(bars, sizes, totals):
+        if val > 0:
+            pct = 100 * val / tot
+            ax.text(bar.get_width() + max_val * 0.01,
+                    bar.get_y() + bar.get_height() / 2,
+                    f'{val:.2f}s ({pct:.0f}%)', va='center', fontsize=9)
 
-    ax.set_yticks(y)
-    ax.set_yticklabels(labels)
+    ax.set_yticks([i for i in range(6) if i != 2])
+    ax.set_yticklabels([l for l in labels if l])
     ax.set_xlabel('Wall time (s)')
-    ax.set_xlim(0, total * 1.25)
+    ax.set_xlim(0, max_val * 1.3)
     ax.invert_yaxis()
     fig.suptitle(
-        f'LSM+CV-LLH wall-time breakdown\n'
-        f'$N={N_DEFAULT:,}$, $M={M_DEFAULT}$, $P={P_DEFAULT}$, '
-        f'total = {total:.1f}s',
+        f'Wall-time breakdown: Plain LSM vs LSM+CV-LLH\n'
+        f'$N={N_DEFAULT:,}$, $M={M_DEFAULT}$, $P={P_DEFAULT}$',
         fontsize=13, y=1.02)
     fig.tight_layout()
     _savefig(fig, 'fig_timing_breakdown.png')
@@ -237,18 +264,50 @@ def plot_method_comparison():
 
 
 # ===================================================================
+# Plot 6: Combined scaling (1x3 horizontal)
+# ===================================================================
+
+def plot_scaling_all():
+    """Single 1x3 figure combining N, M, P scaling experiments."""
+    configs = [
+        ('N', '$N$ (paths)', [1000, 2000, 5000, 10000, 20000, 50000],
+         f'$M={M_DEFAULT}$, $P={P_DEFAULT}$', '#d62728', 'o',
+         lambda v: _time_stages(v, M_DEFAULT, P_DEFAULT, K_RK4)),
+        ('M', '$M$ (exercise dates)', [12, 22, 52, 104, 252],
+         f'$N={N_DEFAULT:,}$, $P={P_DEFAULT}$', '#1f77b4', 's',
+         lambda v: _time_stages(N_DEFAULT, v, P_DEFAULT, K_RK4)),
+        ('P', '$P$ (quadrature nodes)', [65, 129, 257, 513, 1025],
+         f'$N={N_DEFAULT:,}$, $M={M_DEFAULT}$', '#2ca02c', '^',
+         lambda v: _time_stages(N_DEFAULT, M_DEFAULT, v, K_RK4)),
+    ]
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5), sharey=True)
+
+    for ax, (name, sym, values, fixed, color, marker, vary_fn) in zip(axes, configs):
+        times = []
+        for v in values:
+            s = vary_fn(v)
+            times.append(s['Total'])
+            print(f"  {name}={v}: {s['Total']:.3f}s")
+        ax.plot(values, times, f'{marker}-', color=color)
+        ax.set_xlabel(sym)
+        ax.set_title(fixed, fontsize=10)
+
+    axes[0].set_ylabel('Wall time (s)')
+    fig.suptitle('LSM+CV-LLH wall-time scaling', fontsize=13, y=1.02)
+    fig.tight_layout()
+    _savefig(fig, 'fig_scaling_all.png')
+
+
+# ===================================================================
 
 if __name__ == '__main__':
     plt.rcParams.update(STYLE)
 
     print("=== Stage breakdown ===")
     plot_stage_breakdown()
-    print("\n=== Scaling: N ===")
-    plot_scaling_N()
-    print("\n=== Scaling: M ===")
-    plot_scaling_M()
-    print("\n=== Scaling: P ===")
-    plot_scaling_P()
+    print("\n=== Scaling (combined) ===")
+    plot_scaling_all()
     print("\n=== Method comparison ===")
     plot_method_comparison()
     print("\nDone.")

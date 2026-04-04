@@ -82,22 +82,29 @@ def _make_model(name, seed=123, **overrides):
     return pm.ImprovedSteinStein(**params)
 
 
-def _moneyness_label(S0, K):
-    if S0 > K:
-        return 'ITM'
-    elif S0 < K:
-        return 'OTM'
-    return 'ATM'
+def _moneyness_label(S0, K, option_type='call'):
+    if option_type == 'put':
+        if S0 < K:
+            return 'ITM'
+        elif S0 > K:
+            return 'OTM'
+        return 'ATM'
+    else:
+        if S0 > K:
+            return 'ITM'
+        elif S0 < K:
+            return 'OTM'
+        return 'ATM'
 
 
-def _k_panel_label(K, S0_values):
+def _k_panel_label(K, S0_values, option_type='call'):
     S0_mid = np.median(S0_values)
-    ml = _moneyness_label(S0_mid, K)
+    ml = _moneyness_label(S0_mid, K, option_type)
     return f'$K = {K:.0f}$ ({ml})'
 
 
-def _moneyness_label_fixed(S0, K):
-    ml = _moneyness_label(S0, K)
+def _moneyness_label_fixed(S0, K, option_type='call'):
+    ml = _moneyness_label(S0, K, option_type)
     return f'$S_0={S0:.0f},\\ K={K:.0f}$ ({ml})'
 
 
@@ -424,7 +431,7 @@ HORIZON_CONFIGS = {
 AM_K = 100.0
 AM_S0_GRID = (85.0, 90.0, 100.0, 110.0, 115.0)
 AM_MONEYNESS = ('Deep ITM', 'ITM', 'ATM', 'OTM', 'Deep OTM')
-AM_N_PATHS = 10_000
+AM_N_PATHS = 50_000
 AM_LLH_PARAMS = dict(phi_max=300.0, n_phi=513, n_steps_rk4=128)
 
 
@@ -534,7 +541,7 @@ def plot_american_put_panels(pset_name, label, horizon_key,
                     fmt='^-', color='#d62728', capsize=4, label='LSM + CV-LLH')
 
         ax.set_xlabel('$S_0$')
-        ax.set_title(_k_panel_label(K, S0_values))
+        ax.set_title(_k_panel_label(K, S0_values, option_type='put'))
         ax.legend(fontsize=9)
 
         if i == 0:
@@ -629,6 +636,43 @@ def plot_vr_ratios(pset_name, label, am_grid):
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# Plot 7b: Price Shift (bias in SE units) — companion to VR plot
+# ═══════════════════════════════════════════════════════════════════════
+
+def plot_price_shift(pset_name, label, am_grid):
+    """
+    1×2 figure by horizon: line plot showing |CV_price - Plain_price| / Plain_price
+    (relative price difference, %) for CV-BS and CV-LLH across moneyness.
+    """
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharey=True)
+    x = np.arange(len(AM_MONEYNESS))
+    horizon_keys = list(am_grid.keys())
+    cv_styles = [('BS_price', 'CV-BS', '#ff7f0e', 'D-'),
+                 ('LLH_price', 'CV-LLH', '#d62728', '^-')]
+
+    for ax, hkey in zip(axes, horizon_keys):
+        hlbl = HORIZON_CONFIGS[hkey]['label']
+        rows = am_grid[hkey]
+        for pk, cvlbl, color, fmt in cv_styles:
+            vals = [100 * abs(r[pk] - r['Plain_price']) / r['Plain_price']
+                    if r['Plain_price'] > 0 else np.nan for r in rows]
+            ax.plot(x, vals, fmt, color=color, label=cvlbl)
+        ax.set_xticks(x)
+        ax.set_xticklabels(AM_MONEYNESS, rotation=30, ha='right', fontsize=9)
+        ax.set_title(f'{hlbl} horizon')
+        ax.legend(fontsize=9)
+
+    axes[0].set_ylabel('$|P_{\\mathrm{CV}} - P_{\\mathrm{Plain}}|\\;/\\;P_{\\mathrm{Plain}}$ (%)')
+    fig.suptitle(
+        f'Relative price difference vs plain LSM ($K = {AM_K:.0f}$)\n{label} params',
+        fontsize=13, y=1.03)
+    fig.tight_layout()
+    fname = f'fig7b_price_shift_{pset_name}.png'
+    _savefig(fig, fname)
+    print(f"  Saved {fname}")
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # Plot 8: Early Exercise Premium
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -656,8 +700,8 @@ def plot_eep_bars(pset_name, label, am_grid):
 
         ax.set_xticks(x)
         ax.set_xticklabels(AM_MONEYNESS, rotation=30, ha='right', fontsize=9)
-        ax.set_title(hlbl)
-        ax.axhline(0, color='black', lw=0.5, ls='--')
+        ax.set_title(f'{hlbl} horizon')
+        ax.axhline(0, color='gray', ls='--', lw=0.8, alpha=0.6)
         ax.legend(fontsize=9)
 
     axes[0].set_ylabel('EEP (%)')
@@ -702,20 +746,36 @@ def plot_american_bs_limit(n_paths=10_000, seed=42):
         bs_list.append(res_bs.get('price_imp', res_bs['price']))
         bs_se_list.append(res_bs.get('std_err_imp', res_bs['std_err']))
 
-    fig, ax = plt.subplots(figsize=(7, 5))
-    ax.plot(s0_list, mc_list, 's--', color='#2ca02c', label='Euro Put (MC)')
-    ax.errorbar(s0_list, lsm_list, yerr=[1.96 * se for se in lsm_se_list],
-                fmt='o-', color='#1f77b4', capsize=4, label='Plain LSM')
-    ax.errorbar(s0_list, bs_list, yerr=[1.96 * se for se in bs_se_list],
-                fmt='^-', color='#d62728', capsize=4, label='LSM + CV-BS')
-    ax.set_xlabel('$S_0$')
-    ax.set_ylabel('Put price')
-    ax.set_title(
-        f'American put prices — Black-Scholes limit ($T = 1$ yr)\n'
-        r'$r=0.05,\;\sigma_0=0.2,\;\kappa=\nu=\lambda=\eta=\rho=0$',
-        fontsize=13)
-    ax.legend()
-    ax.grid(True, alpha=0.3)
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+
+    # Left panel: price plot
+    ax1.plot(s0_list, mc_list, 's--', color='#2ca02c', label='Euro Put (MC)')
+    ax1.errorbar(s0_list, lsm_list, yerr=[1.96 * se for se in lsm_se_list],
+                 fmt='o-', color='#1f77b4', capsize=4, label='Plain LSM')
+    ax1.errorbar(s0_list, bs_list, yerr=[1.96 * se for se in bs_se_list],
+                 fmt='^-', color='#d62728', capsize=4, label='LSM + CV-BS')
+    ax1.set_xlabel('$S_0$')
+    ax1.set_ylabel('Put price')
+    ax1.set_title('American put prices')
+    ax1.legend(fontsize=9)
+
+    # Right panel: VR bar chart
+    vr = [(lse / bse)**2 if bse > 0 else np.nan
+          for lse, bse in zip(lsm_se_list, bs_se_list)]
+    x = np.arange(len(s0_list))
+    labels = [f'{s:.0f}' for s in s0_list]
+    ax2.bar(x, vr, color='#d62728', alpha=0.85)
+    ax2.set_xticks(x)
+    ax2.set_xticklabels(labels)
+    ax2.set_xlabel('$S_0$')
+    ax2.set_ylabel('VR Ratio')
+    ax2.set_title('Variance reduction (CV-BS)')
+    ax2.axhline(1, color='gray', ls='--', lw=0.8, alpha=0.6)
+
+    fig.suptitle(
+        r'Black--Scholes limit ($r=0.05,\;\sigma_0=0.2,\;'
+        r'\kappa=\nu=\lambda=\eta=\rho=0$), $T=1$ yr',
+        fontsize=13, y=1.03)
     fig.tight_layout()
     _savefig(fig, 'fig9_american_put_bs_limit.png')
     print("  Saved fig9_american_put_bs_limit.png")
@@ -726,25 +786,27 @@ def plot_american_bs_limit(n_paths=10_000, seed=42):
 # ═══════════════════════════════════════════════════════════════════════
 
 def plot_mc_path_convergence(pset_name, label,
-                             S0_cases=((90.0, 'ITM'), (100.0, 'ATM')),
-                             K=100.0, T=1.0, n_steps_mc=52,
+                             S0_cases=((90.0, 100.0, 'ITM'), (100.0, 80.0, 'OTM')),
+                             T=1.0, n_steps_mc=52,
                              N_values=(10_000, 50_000, 100_000, 250_000, 500_000),
                              base_seed=100):
     """
     Two figures (price convergence + EEP convergence) showing the effect of
     increasing MC paths on Plain LSM and CV-BS estimators.
+
+    S0_cases: tuple of (S0, K, label) triples — each panel uses its own strike.
     """
     # Collect data
-    data = {s0_label: [] for _, s0_label in S0_cases}
-    for S0, s0_label in S0_cases:
+    data = {s0_label: [] for _, _, s0_label in S0_cases}
+    for S0, K_case, s0_label in S0_cases:
         for n in N_values:
             model = _make_model(pset_name, seed=base_seed)
             sim = model.simulate_prices(S0=S0, T=T, n_steps_mc=n_steps_mc, n_paths=n)
-            mc_put = pm.price_put_mc(sim['S'], K=K, T=T, r=model.r)['price']
+            mc_put = pm.price_put_mc(sim['S'], K=K_case, T=T, r=model.r)['price']
             res_plain = aop.price_american_put_lsm_llh(
-                model, sim, K, use_cv=False, ridge=1e-5)
+                model, sim, K_case, use_cv=False, ridge=1e-5)
             res_bs = aop.price_american_put_lsm_llh(
-                model, sim, K, use_cv=True, euro_method='bs', ridge=1e-5)
+                model, sim, K_case, use_cv=True, euro_method='bs', ridge=1e-5)
             data[s0_label].append({
                 'N': n,
                 'mc_put': mc_put,
@@ -756,12 +818,14 @@ def plot_mc_path_convergence(pset_name, label,
             print(f"    {s0_label} N={n:>7}: Plain={res_plain['price']:.4f} "
                   f"CV-BS={res_bs.get('price_imp', res_bs['price']):.4f}")
 
+    tick_labels = [f'{n // 1000}k' for n in N_values]
+
     # --- Fig 10a: Price convergence ---
     fig, axes = plt.subplots(1, len(S0_cases), figsize=(14, 5), sharey=False)
     if len(S0_cases) == 1:
         axes = [axes]
 
-    for ax, (S0, s0_label) in zip(axes, S0_cases):
+    for ax, (S0, K_case, s0_label) in zip(axes, S0_cases):
         rows = data[s0_label]
         ns = [r['N'] for r in rows]
         ax.errorbar(ns, [r['plain_price'] for r in rows],
@@ -771,14 +835,16 @@ def plot_mc_path_convergence(pset_name, label,
                     yerr=[1.96 * r['bs_se'] for r in rows],
                     fmt='D-', color='#ff7f0e', capsize=4, label='CV-BS')
         ax.set_xscale('log')
+        ax.set_xticks(N_values)
+        ax.set_xticklabels(tick_labels)
         ax.set_xlabel('$N$ (paths)')
-        ax.set_title(f'$S_0={S0:.0f}$, $K={K:.0f}$ ({s0_label})')
+        ax.set_title(f'$S_0={S0:.0f}$, $K={K_case:.0f}$ ({s0_label})')
         ax.legend(fontsize=9)
 
     axes[0].set_ylabel('American put price')
     fig.suptitle(
         f'American put price convergence with $N$\n'
-        f'{label} params, $K={K:.0f}$, 1-year horizon',
+        f'{label} params, 1-year horizon',
         fontsize=13, y=1.03)
     fig.tight_layout()
     fname = f'fig10_price_convergence_{pset_name}.png'
@@ -790,7 +856,7 @@ def plot_mc_path_convergence(pset_name, label,
     if len(S0_cases) == 1:
         axes = [axes]
 
-    for ax, (S0, s0_label) in zip(axes, S0_cases):
+    for ax, (S0, K_case, s0_label) in zip(axes, S0_cases):
         rows = data[s0_label]
         ns = [r['N'] for r in rows]
         eep_plain = [100 * (r['plain_price'] - r['mc_put']) / r['mc_put']
@@ -801,15 +867,17 @@ def plot_mc_path_convergence(pset_name, label,
         ax.plot(ns, eep_plain, 'o-', color='#1f77b4', label='Plain LSM')
         ax.plot(ns, eep_bs, 'D-', color='#ff7f0e', label='CV-BS')
         ax.set_xscale('log')
+        ax.set_xticks(N_values)
+        ax.set_xticklabels(tick_labels)
         ax.set_xlabel('$N$ (paths)')
-        ax.set_title(f'$S_0={S0:.0f}$, $K={K:.0f}$ ({s0_label})')
+        ax.set_title(f'$S_0={S0:.0f}$, $K={K_case:.0f}$ ({s0_label})')
         ax.axhline(0, color='black', lw=0.5, ls='--')
         ax.legend(fontsize=9)
 
     axes[0].set_ylabel('EEP (%)')
     fig.suptitle(
         f'Early exercise premium convergence with $N$\n'
-        f'{label} params, $K={K:.0f}$, 1-year horizon',
+        f'{label} params, 1-year horizon',
         fontsize=13, y=1.03)
     fig.tight_layout()
     fname = f'fig10_eep_convergence_{pset_name}.png'
@@ -860,6 +928,9 @@ def _run_param_set(pset_name):
 
     print("  Plot 7: Variance reduction ratios...")
     plot_vr_ratios(pset_name, label, am_grid)
+
+    print("  Plot 7b: Price shift (bias in SE units)...")
+    plot_price_shift(pset_name, label, am_grid)
 
     print("  Plot 8: Early exercise premium...")
     plot_eep_bars(pset_name, label, am_grid)

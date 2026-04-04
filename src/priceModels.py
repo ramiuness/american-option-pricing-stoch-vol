@@ -521,6 +521,7 @@ class ImprovedSteinStein:
     # ---------- American pricing (delegates to amOptPricer) ----------
 
     def price_american_put(self, sim_out, K, basis_order=3,
+                           basis_type='laguerre',
                            use_cv=True, improved=True, ridge=0.0,
                            euro_method='llh', floor_method='bs',
                            phi_max=300.0, n_phi=513, n_steps_rk4=128, eps0=1e-6):
@@ -528,6 +529,7 @@ class ImprovedSteinStein:
         import amOptPricer as aop
         return aop.price_american_put_lsm_llh(
             self, sim_out, K, basis_order=basis_order,
+            basis_type=basis_type,
             use_cv=use_cv, improved=improved, ridge=ridge,
             euro_method=euro_method, floor_method=floor_method,
             phi_max=phi_max, n_phi=n_phi, n_steps_rk4=n_steps_rk4, eps0=eps0

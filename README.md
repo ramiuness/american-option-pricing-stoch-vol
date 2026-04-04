@@ -44,19 +44,22 @@ Reference parameters from Lin-Lin-He:
 ```
 src/
   priceModels.py        # LLH simulation + European pricing (ODE/quadrature + BS/MC)
-  amOptPricer.py        # LSM + Rasmussen control variates (re-exports European pricing for compat)
+  amOptPricer.py        # LSM + Rasmussen control variates; Laguerre and Gaussian RBF bases
   calibrate.py          # LLH calibration to market options (DE + L-BFGS-B)
   reporting.py          # Notebook presentation helpers
   generate_plots.py     # Plot generation for European and American pricing reports
   timing_analysis.py    # Empirical timing analysis of LSM+CV-LLH (scaling, stage breakdown)
+  testing.py            # Regression-basis and CI comparison utilities
   *_v0.py               # Archived originals (gitignored)
 
 notebooks/
-  european_pricing.ipynb      # European price validation + S&Z Table 2 comparison
-  american_pricing.ipynb      # American put pricing: LSM vs CV-BS vs CV-LLH + BS-limit validation
-  calibration.ipynb           # Calibrate LLH to S&P 500 options
-  char_func_symbolic.ipynb    # SymPy proof: ansatz non-closure (degree-4 argument)
-  stylized_facts.ipynb        # Parameter impact on return distributions
+  european_pricing.ipynb              # European price validation + S&Z Table 2 comparison
+  american_pricing.ipynb              # American put pricing: LSM vs CV-BS vs CV-LLH + BS-limit validation
+  regression_basis_comparison.ipynb   # Laguerre vs Gaussian RBF: prices, sensitivity, bias
+  ci_comparison.ipynb                 # Single-run CLT vs multi-run confidence intervals
+  calibration.ipynb                   # Calibrate LLH to S&P 500 options
+  char_func_symbolic.ipynb            # SymPy proof: ansatz non-closure (degree-4 argument)
+  stylized_facts.ipynb                # Parameter impact on return distributions
 
 reports/
   llh-formula.pdf             # Theoretical derivation of the European price formula
@@ -82,7 +85,11 @@ where P1, P2 are computed via the characteristic functions f1, f2 obtained by so
 
 ### American Put Price (LSM + CV)
 
-The Longstaff-Schwartz algorithm uses Laguerre polynomial regression to estimate continuation values at each exercise date. Three European put estimators are available as Rasmussen control variates:
+The Longstaff-Schwartz algorithm estimates continuation values at each exercise date by regression on a basis of the current spot. Two basis types are supported via `basis_type`:
+- **Laguerre** (`basis_type='laguerre'`): Laguerre polynomials of order `basis_order` (default 3, giving 4 basis functions)
+- **Gaussian** (`basis_type='gaussian'`): Gaussian RBFs at `basis_order` quantile-grid centers (default 15), Silverman bandwidth, adaptive per time step
+
+Three European put estimators are available as Rasmussen control variates:
 - **LLH** (`euro_method='llh'`): exact LLH European put via ODE/quadrature (slow, best VR)
 - **BS** (`euro_method='bs'`): Black-Scholes proxy (fast, moderate VR)
 - **MC1** (`euro_method='mc1'`): single-path terminal payoff estimate

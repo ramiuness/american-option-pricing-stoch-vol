@@ -20,6 +20,23 @@ def _laguerre_basis(x, order=3):
     return lagvander(x, order)
 
 
+def _gaussian_rbf_basis(x, centers, bandwidth):
+    """Gaussian RBF basis: Phi[i,k] = exp(-|x_i - c_k|^2 / (2*h^2))."""
+    x = np.asarray(x, dtype=float).reshape(-1, 1)
+    c = np.asarray(centers, dtype=float).reshape(1, -1)
+    return np.exp(-((x - c) ** 2) / (2 * bandwidth ** 2))
+
+
+def _compute_rbf_params(x_itm, n_centers):
+    """Quantile-grid centers + Silverman bandwidth from ITM spots."""
+    n = len(x_itm)
+    if n < 2:
+        return np.array([x_itm.mean() if n > 0 else 1.0]), 1.0
+    centers = np.quantile(x_itm, np.linspace(0, 1, n_centers))
+    bandwidth = 1.06 * x_itm.std(ddof=1) * n ** (-0.2)
+    return centers, max(bandwidth, 1e-8)
+
+
 def _ols_fit_predict(Phi, y, Phi_all, ridge=0.0, ridge_eps=1e-12):
     """
     Solve min ||Phi * beta - y||_2 (optionally ridge) and predict on Phi_all.
@@ -165,6 +182,7 @@ def _euro_put_slice(method, model, sim_out, j, S_col, vol_col, theta_col, tau, K
 # ===================== Main LSM pricer with CV (PUT) =======================
 
 def price_american_put_lsm_llh(model, sim_out, K, basis_order=3,
+                               basis_type='laguerre',
                                use_cv=True, improved=True, ridge=0.0,
                                euro_method='llh', floor_method='bs',
                                phi_max=300.0, n_phi=513, n_steps_rk4=128, eps0=1e-6):
@@ -266,11 +284,18 @@ def price_american_put_lsm_llh(model, sim_out, K, basis_order=3,
         np.subtract(K, Sj, out=_Ij)
         np.maximum(_Ij, 0.0, out=_Ij)
         Ij = _Ij
-
-        # ITM set and basis on x = S/K
-        np.divide(Sj, K, out=_x)
-        Phi_all = _laguerre_basis(_x, order=basis_order)
         itm = (Ij > 0.0)
+
+        # Basis on x = S/K
+        np.divide(Sj, K, out=_x)
+        if basis_type == 'laguerre':
+            Phi_all = _laguerre_basis(_x, order=basis_order)
+        elif basis_type == 'gaussian':
+            x_itm_vals = _x[itm] if itm.any() else _x
+            centers, bw = _compute_rbf_params(x_itm_vals, basis_order)
+            Phi_all = _gaussian_rbf_basis(_x, centers, bw)
+        else:
+            raise ValueError(f"Unknown basis_type: '{basis_type}'")
 
         if use_cv:
             # Step 3(ii): European PUT E_j via selected method
