@@ -65,8 +65,6 @@ reports/
   llh-formula.pdf             # Theoretical derivation of the European price formula
   llh-formula-report.pdf      # Extended report with European pricing results
   pricing-project.pdf         # Project report
-  american_pricing_report.tex # American pricing report (compilable LaTeX)
-  american_pricing_report.pdf # Compiled American pricing report
 ```
 
 ---
