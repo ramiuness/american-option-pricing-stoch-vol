@@ -112,10 +112,29 @@ def filter_options(df, spot,
                    min_open_interest=100,
                    min_bid=0.10,
                    otm_only=True):
-    """
-    Filter option data to liquid, near-the-money contracts.
+    """Filter raw option chain data to liquid, near-the-money contracts.
 
-    Returns filtered DataFrame.
+    Applies sequential filters on bid quality, mid-price positivity,
+    volume, open interest, moneyness (K/S), and maturity range.
+    When ``otm_only=True`` (default), retains only OTM calls (K > S)
+    and OTM puts (K <= S) to avoid redundant ATM/ITM contracts.
+
+    Parameters
+    ----------
+    df                : DataFrame from fetch_spx_options() with columns
+                        strike, bid, mid_price, volume, openInterest,
+                        option_type, tau
+    spot              : float — current underlying price
+    moneyness_range   : tuple (lo, hi) — keep K/S in [lo, hi]
+    tau_range         : tuple (lo, hi) — keep maturities in [lo, hi] years
+    min_volume        : int — minimum daily volume
+    min_open_interest : int — minimum open interest
+    min_bid           : float — minimum bid price
+    otm_only          : bool — if True, retain only out-of-the-money contracts
+
+    Returns
+    -------
+    pd.DataFrame — filtered copy of the input, reset-indexed
     """
     df = df.copy()
 

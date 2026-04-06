@@ -1,7 +1,15 @@
-# Archived v0 files (pre-optimization originals)
-src/amOptPricer_0.py
-src/priceModels_v0.py
-src/amOptPricer_v0.py
+# Archived v0 modules
+src/*_v0.py
+
+# Report build artifacts and sources
+reports/*.aux
+reports/*.log
+reports/*.out
+reports/*.toc
+reports/*.synctex.gz
+reports/*.bbl
+reports/*.blg
+reports/*.tex
 
 # Claude Code internal files
 CLAUDE.md

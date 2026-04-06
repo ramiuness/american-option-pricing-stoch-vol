@@ -1,9 +1,16 @@
+"""Notebook presentation helpers for European and American pricing comparisons.
+
+Provides comparison tables (LLH vs MC, S&Z Table 2), American put pricing
+across moneyness levels, variance reduction summaries, early exercise premium
+computation, and timing benchmarks.
+"""
+
 import time
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import priceModels as pm
-import amOptPricer as aop
+import amerPrice as ap
 
 
 def llh_vs_mc(model, S_vals, K_vals, tau, n_steps_mc, n_paths,
@@ -299,7 +306,14 @@ def build_vr_summary(results_dict):
 
 
 def plot_vr_bars(vr_df, moneyness_labels):
-    """Plot variance reduction ratio bar charts for CV-BS and CV-LLH."""
+    """Plot grouped bar charts of variance reduction ratios for CV-BS and CV-LLH.
+
+    Parameters
+    ----------
+    vr_df            : DataFrame from build_vr_summary(), with columns
+                       Setting, Moneyness, CV-BS VR, CV-LLH VR
+    moneyness_labels : list of str used to order the x-axis categories
+    """
     fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharey=True)
     for ax, method, col in zip(axes, ['CV-BS', 'CV-LLH'], ['CV-BS VR', 'CV-LLH VR']):
         pivot = vr_df.pivot(index='Moneyness', columns='Setting', values=col)

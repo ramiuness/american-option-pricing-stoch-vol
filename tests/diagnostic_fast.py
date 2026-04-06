@@ -4,7 +4,7 @@ Fast diagnostic script - focuses on key findings without expensive computations.
 
 import numpy as np
 import priceModels as pm
-import amOptPricer as aop
+import amerPrice as ap
 
 print("="*80)
 print("FAST DIAGNOSTIC ANALYSIS")
@@ -33,7 +33,7 @@ print("-" * 80)
 K = 100.0
 tau = 0.25
 
-bs_call = aop.price_call_bs(S=S0, K=K, tau=tau, r=0.05, vol=0.2)
+bs_call = ap.price_call_bs(S=S0, K=K, tau=tau, r=0.05, vol=0.2)
 bs_put = bs_call - S0 + K * np.exp(-0.05 * tau)
 
 llh_call = model_bs.price_call_llh(S=S0, K=K, tau=tau, vol=0.2, theta=0.0).item()
@@ -52,7 +52,7 @@ print(f"\n[3] AMERICAN VS EUROPEAN PRICING (BS Limit)")
 print("-" * 80)
 res_am = model_bs.simulate_prices(S0=S0, T=tau, n_steps=22, n_paths=1000)
 
-am_result = aop.price_american_put_lsm_llh(
+am_result = ap.price_american_put_lsm_llh(
     model_bs, res_am, K=K, basis_order=3,
     use_cv=True, improved=True, ridge=1e-5,
     euro_method='llh'
@@ -84,7 +84,7 @@ euro_call_llh = model_llh.price_call_llh(S=S0_test, K=K_test, tau=tau_1m,
                                          vol=model_llh.sigma0, theta=model_llh.theta0).item()
 euro_put_llh = euro_call_llh - S0_test + K_test * np.exp(-model_llh.r * tau_1m)
 
-am_result_llh = aop.price_american_put_lsm_llh(
+am_result_llh = ap.price_american_put_lsm_llh(
     model_llh, res_llh, K=K_test, basis_order=3,
     use_cv=True, improved=True, ridge=1e-5,
     euro_method='llh'

@@ -4,8 +4,7 @@ sys.path.insert(0, '.')
 
 import numpy as np
 import priceModels as pm
-import amOptPricer as aop_original
-import amOptPricer_corrected as aop_corrected
+import amerPrice as ap
 
 print("="*80)
 print("TEST: Matching demo.ipynb Conditions")
@@ -34,14 +33,14 @@ print(f"European put (LLH formula): {euro_put:.6f}")
 res = model_llh.simulate_prices(S0=S0, T=tau, n_steps=n_steps, n_paths=n_paths)
 
 # American with ORIGINAL (using LLH CV - same as notebook)
-am_orig = aop_original.price_american_put_lsm_llh(
+am_orig = ap.price_american_put_lsm_llh(
     model_llh, res, K=K, basis_order=3,
     use_cv=True, improved=True, ridge=1e-5,
     euro_method='llh'  # Same as notebook
 )
 
 # American with CORRECTED
-am_corr = aop_corrected.price_american_put_lsm_llh(
+am_corr = ap.price_american_put_lsm_llh(
     model_llh, res, K=K, basis_order=3,
     use_cv=True, improved=True, ridge=1e-5,
     euro_method='llh'
@@ -83,13 +82,13 @@ print(f"European put (LLH formula): {euro_put_1y:.6f}")
 res_1y = model_llh.simulate_prices(S0=S0, T=tau_1y, n_steps=n_steps_1y, n_paths=1000)
 
 # American prices
-am_orig_1y = aop_original.price_american_put_lsm_llh(
+am_orig_1y = ap.price_american_put_lsm_llh(
     model_llh, res_1y, K=K, basis_order=3,
     use_cv=True, improved=True, ridge=1e-5,
     euro_method='llh'
 )
 
-am_corr_1y = aop_corrected.price_american_put_lsm_llh(
+am_corr_1y = ap.price_american_put_lsm_llh(
     model_llh, res_1y, K=K, basis_order=3,
     use_cv=True, improved=True, ridge=1e-5,
     euro_method='llh'

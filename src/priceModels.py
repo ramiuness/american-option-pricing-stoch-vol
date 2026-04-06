@@ -1,8 +1,9 @@
 """
-LLH (Lin-Lin-He) stochastic volatility model: simulation + European pricing.
-See reports/eur_price_llh.pdf for the theoretical derivation.
+LLH (Lin-Lin-He 2024) improved Stein-Stein stochastic volatility model.
 
-Optimized v2: in-place RK4, reduced allocations, shared power arrays.
+Provides Monte Carlo simulation, closed-form European pricing via characteristic
+function / ODE integration, and Black-Scholes baselines.
+See reports/llh-formula.pdf for the theoretical derivation.
 """
 
 from dataclasses import dataclass
@@ -10,37 +11,32 @@ import numpy as np
 from scipy.stats import lognorm, kstest
 
 
-#############################################################################
-######################## LLH Model Simulation ###############################
-#############################################################################
+# ─── Simulation primitives (private) ─────────────────────────────────────────
 
-# General utilities for the LLH model simulation
-
-def draw_correlated_normals(rng, n_paths: int, n_steps_mc: int, rho: float):
-    """Return Z1, Z2 ~ N(0,1) with Corr(Z1, Z2)=rho. Shapes: (n_paths, n_steps_mc)."""
+def _draw_correlated_normals(rng, n_paths: int, n_steps_mc: int, rho: float):
+    """Correlated standard normals Z1, Z2 with Corr(Z1,Z2)=rho, each (n_paths, n_steps_mc)."""
     Z1 = rng.standard_normal((n_paths, n_steps_mc))
     Z2i = rng.standard_normal((n_paths, n_steps_mc))
     Z2 = rho * Z1 + np.sqrt(max(0.0, 1.0 - rho**2)) * Z2i
     return Z1, Z2
 
-def brownian_from_normals(Z: np.ndarray, dt: float):
-    """dW = sqrt(dt)*Z, W = cumsum(dW, axis=1)."""
+def _brownian_from_normals(Z: np.ndarray, dt: float):
+    """Increments dW and cumulative Brownian W from standard normals Z, both (n_paths, n_steps_mc)."""
     dW = np.sqrt(dt) * Z
     W = np.cumsum(dW, axis=1)
     return dW, W
 
-def gbm_from_formula(W: np.ndarray, dt: float):
-    """B = exp(W - 0.5*t) where W is Brownian motion at times t=dt, 2dt, ..., n*dt."""
+def _gbm_from_formula(W: np.ndarray, dt: float):
+    """Unit-drift geometric Brownian motion B = exp(W - t/2), shape (n_paths, n_steps_mc)."""
     n = W.shape[1]
     t_grid = dt * np.arange(1, n + 1)[None, :]
     B = np.exp(W - 0.5 * t_grid)
     return B
 
-def causal_exp_conv(X: np.ndarray, a1: float):
-    """
-    Causal exponential-kernel convolution:
-      s_j = sum_{i=1}^j (a1**i) * X_{j-i},  j=1..n
-    Implemented via reweight + cumsum.
+def _causal_exp_conv(X: np.ndarray, a1: float):
+    """Causal exponential-kernel convolution s_j = sum_{i=1}^{j} a1^i X_{j-i}.
+
+    Returns array with same shape as X (n_paths, n_steps_mc).
     """
     n = X.shape[1]
     j = np.arange(n)
@@ -50,10 +46,9 @@ def causal_exp_conv(X: np.ndarray, a1: float):
 
 
 def _causal_exp_conv_pair(X1, X2, a1):
-    """Two causal exponential convolutions sharing the same power arrays.
+    """Paired causal exponential convolution reusing power arrays for efficiency.
 
-    Equivalent to (causal_exp_conv(X1, a1), causal_exp_conv(X2, a1))
-    but reuses the a1^(-j) and a1^(j+1) arrays to halve allocation.
+    Returns (conv(X1, a1), conv(X2, a1)), each (n_paths, n_steps_mc).
     """
     n = X1.shape[1]
     j = np.arange(n)
@@ -71,16 +66,17 @@ def _causal_exp_conv_pair(X1, X2, a1):
     return r1, r2
 
 
-def sigma_hat_from_components(
+def _sigma_hat_from_components(
     n_steps_mc: int, dt: float, kappa: float, sigma0: float, theta0: float, lam: float,
     nu: float, eta: float, W2: np.ndarray, B: np.ndarray
 ):
-    """Compute sigma_hat at times 0, Δt, ..., (n-1)Δt so that sigma_hat[:,j] = σ(t_j).
+    """LLH volatility process sigma_hat[:,j] = sigma(t_j), adapted to F_{t_j}.
 
-    This ensures sigma_hat[:,j] is F_{t_j}-measurable and can be correctly paired
-    with dW1[:,j] (the increment on [t_j, t_{j+1}]) in the Euler scheme.
+    Ensures correct pairing with dW1[:,j] (the increment on [t_j, t_{j+1}]).
 
-    Returns (n_paths, n_steps_mc).
+    Returns
+    -------
+    sigma_hat : ndarray, shape (n_paths, n_steps_mc)
     """
     n_paths = W2.shape[0]
     idx = np.arange(0, n_steps_mc)[None, :]
@@ -113,112 +109,24 @@ def sigma_hat_from_components(
     )
     return sigma_hat
 
-def multiplicative_euler_prices(S0: float, r: float, sigma_hat: np.ndarray, dW1: np.ndarray, dt: float):
-    """S = S0 * cumprod(1 + r*dt + σ̂ * dW1) along time. Returns shape (n_paths, n_steps_mc)."""
+def _multiplicative_euler_prices(S0: float, r: float, sigma_hat: np.ndarray, dW1: np.ndarray, dt: float):
+    """Multiplicative Euler scheme for the asset price, shape (n_paths, n_steps_mc)."""
     increments = 1.0 + r * dt + sigma_hat * dW1
     return S0 * np.cumprod(increments, axis=1)
 
-def plot(paths, title="Simulated Price Paths"):
-    """Plot the simulated prices."""
-    import matplotlib.pyplot as plt
-    plt.plot(paths)
-    plt.title(title)
-    plt.xlabel("Time Steps")
-    plt.ylabel("Price")
-    plt.grid()
-    plt.tight_layout()
-    plt.show()
 
+# ─── ODE system & quadrature (private) ───────────────────────────────────────
 
-def test_lognormality(data):
-    """
-    Perform the Kolmogorov-Smirnov test to check if the data follows a lognormal distribution.
-    """
-    data = data[data > 0]
-    shape, loc, scale = lognorm.fit(data, floc=0)
-    D, p_value = kstest(data, 'lognorm', args=(shape, loc, scale))
+def _trap_weights(n, simplified=False):
+    """Composite trapezoid weights for n uniform-grid nodes.
 
-    print(f"KS statistic: {D:.4f}, p-value: {p_value:.4g}")
-    if p_value > 0.05:
-        print("Fail to reject null: data may be lognormal.")
-    else:
-        print("Reject null: data is not lognormal.")
+    When simplified=True, halves only the first weight (Boyarchenko-Levendorskii
+    Eq. 2.31); otherwise standard half-weights at both endpoints.
 
-
-#############################################################################
-#################### European Black-Scholes & MC Pricing ####################
-#############################################################################
-
-def price_call_bs(S, K=90, tau=1.0, r=0.05, vol=0.2):
-    """
-    Black-Scholes European call price (scalar inputs).
-    """
-    if tau <= 0:
-        return max(0.0, S - K)
-    v = vol * np.sqrt(tau)
-    d1 = (np.log(S/K) + (r + 0.5*vol*vol)*tau) / v
-    d2 = d1 - v
-    from scipy.stats import norm as _norm
-    return float(S * _norm.cdf(d1) - K * np.exp(-r*tau) * _norm.cdf(d2))
-
-
-def price_put_bs(S, K=90, tau=1.0, r=0.05, vol=0.2):
-    """
-    Black-Scholes European put price (scalar inputs, via put-call parity).
-    """
-    return price_call_bs(S, K, tau, r, vol) - S + K * np.exp(-r * tau)
-
-
-def price_call_mc(paths, K, T, r=None):
-    """
-    Monte Carlo European call pricing.
-    Returns dict with price, std_err, ci_95, n_paths.
-    """
-    n_paths = paths.shape[0]
-    disc = np.exp(-r * T)
-    Y = disc * np.maximum(paths[:, -1] - K, 0.0)
-    price = Y.mean()
-    std_err = Y.std(ddof=1) / np.sqrt(n_paths)
-    ci95 = (price - 1.96*std_err, price + 1.96*std_err)
-    return {
-        'price': price,
-        'std_err': std_err,
-        'ci_95': ci95,
-        'n_paths': n_paths
-    }
-
-
-def price_put_mc(paths, K, T, r=None):
-    """
-    Monte Carlo European put pricing.
-    Returns dict with price, std_err, ci_95, n_paths.
-    """
-    n_paths = paths.shape[0]
-    disc = np.exp(-r * T)
-    Y = disc * np.maximum(K - paths[:, -1], 0.0)
-    price = Y.mean()
-    std_err = Y.std(ddof=1) / np.sqrt(n_paths)
-    ci95 = (price - 1.96*std_err, price + 1.96*std_err)
-    return {
-        'price': price,
-        'std_err': std_err,
-        'ci_95': ci95,
-        'n_paths': n_paths
-    }
-
-
-#############################################################################
-########## European price formula under the LLH Model  ######################
-#############################################################################
-
-# ---------- Trapezoid (Boyarchenko–Levendorskii) utilities ----------
-
-def trap_weights(n, simplified=False):
-    """
-    Composite trapezoid weights for n nodes (uniform grid).
-    If simplified=True, apply 1/2 only at the first node (φ=0) as in (2.31);
-    otherwise use the standard 1/2 at both ends.
-    Returns an array of shape (n,) to be scaled by the step size h.
+    Returns
+    -------
+    w : ndarray, shape (n,)
+        Weights to be scaled by the step size h.
     """
     w = np.ones(n, dtype=np.float64)
     w[0] = 0.5
@@ -226,24 +134,29 @@ def trap_weights(n, simplified=False):
         w[-1] = 0.5
     return w
 
-def phi_grid(phi_max, n_phi, eps0=1e-6):
-    """Uniform φ-grid on [0, phi_max], with φ[0]=eps0 to avoid division by zero."""
+def _phi_grid(phi_max, n_phi, eps0=1e-6):
+    """Uniform phi-grid on [0, phi_max] with phi[0]=eps0 to avoid 1/phi singularity."""
     phi = np.linspace(0.0, phi_max, n_phi, dtype=np.float64)
     phi[0] = eps0
     return phi
 
 
-# ---------- ODE system & integrator ----------
+def _rhs_factory(phi, r, kappa, nu, lam, eta, rho):
+    """Build the ODE right-hand side for the LLH characteristic-exponent system (Eq. 4).
 
-def rhs_factory(phi, r, kappa, nu, lam, eta, rho):
-    """
-    Returns RHS (callable) for ODE system Eq. (4) of Lin-Lin-He paper for both j=1,2, batched over φ.
-    Shapes:
-      - Y: (n_phi, 2, 6) complex, with components (C,D,E,F,G,H)
-      - dY: same shape
+    Batched over phi and both j=1,2 branches simultaneously.
 
-    The returned rhs(Y, out=None) accepts an optional pre-allocated output buffer
-    to avoid allocations in the RK4 inner loop.
+    Parameters
+    ----------
+    phi : ndarray, shape (n_phi,)
+    r, kappa, nu, lam, eta, rho : float
+        LLH model parameters.
+
+    Returns
+    -------
+    rhs : callable
+        rhs(Y, out=None) -> dY, where Y and dY have shape (n_phi, 2, 6)
+        with components ordered (C, D, E, F, G, H).
     """
     # Pre-compute constants (avoids recomputation in 512 rhs calls)
     nu2 = nu ** 2
@@ -288,10 +201,13 @@ def rhs_factory(phi, r, kappa, nu, lam, eta, rho):
     return rhs
 
 
-def rk4_integrate(rhs, tau, n_steps_ode, n_phi):
-    """Integrate from τ=0 to τ with RK4. Returns dict of coeff arrays (n_phi,2) with keys C,D,E,F,G,H.
+def _rk4_integrate(rhs, tau, n_steps_ode, n_phi):
+    """Integrate the characteristic-exponent ODE from tau=0 to tau via RK4.
 
-    Uses pre-allocated buffers for k1-k4 and Y_tmp to minimize allocation traffic.
+    Returns
+    -------
+    coeffs : dict
+        Keys 'C','D','E','F','G','H', each ndarray of shape (n_phi, 2).
     """
     Z = np.zeros((n_phi, 2), dtype=np.complex128)
     Y = np.stack([Z,Z,Z,Z,Z,Z], axis=-1)
@@ -300,7 +216,7 @@ def rk4_integrate(rhs, tau, n_steps_ode, n_phi):
 
     dt = tau / n_steps_ode
 
-    # Pre-allocate RK4 workspace 
+    # Pre-allocate RK4 workspace
     k1 = np.empty_like(Y)
     k2 = np.empty_like(Y)
     k3 = np.empty_like(Y)
@@ -324,16 +240,22 @@ def rk4_integrate(rhs, tau, n_steps_ode, n_phi):
     return {k: Y[..., j] for j, k in enumerate("CDEFGH")}
 
 
-# ---------- Vectorized transform & pricing ----------
+# ─── Characteristic function transform (private) ─────────────────────────────
 
-def build_transform_vec(coeffs, S_vec, v_vec, theta_vec, phi):
-    """
-    Vectorized transform over paths:
-      f(φ) = exp(C + D v^2 + E v θ + F θ^2 + G θ + H v + i φ ln S).
-    Returns array with shape (n_phi, 2, N) where N = len(S_vec).
+def _build_transform_vec(coeffs, S_vec, v_vec, theta_vec, phi):
+    """Characteristic-function transform f(phi) = exp(C + Dv^2 + Ev*theta + ...) over N paths.
 
-    coeffs: dict with keys 'C','D','E','F','G','H' each of shape (n_phi,2)
-            OR a pre-stacked (n_phi, 2, 6) array (if stacked in LLHPrecompute)
+    Parameters
+    ----------
+    coeffs : dict or ndarray
+        Dict with keys 'C'..'H' each (n_phi, 2), or pre-stacked (n_phi, 2, 6).
+    S_vec, v_vec, theta_vec : array-like, shape (N,)
+        Spot prices, instantaneous volatilities, and long-run volatilities.
+    phi : ndarray, shape (n_phi,)
+
+    Returns
+    -------
+    f : ndarray, shape (n_phi, 2, N)
     """
     S_vec = np.asarray(S_vec, dtype=float).reshape(-1)
     v_vec = np.asarray(v_vec, dtype=float).reshape(-1)
@@ -368,15 +290,21 @@ def build_transform_vec(coeffs, S_vec, v_vec, theta_vec, phi):
     return np.exp(quad)
 
 
-def compute_P_vec(f, K, phi, w):
-    """
-    Vectorized trapezoid integration for P1, P2 using precomputed f(φ).
-    f : (n_phi, 2, N) complex
-    K : float or array (N,)
-    phi : (n_phi,)
-    w : (n_phi,)
+def _compute_P_vec(f, K, phi, w):
+    """Risk-neutral probabilities P1, P2 via trapezoid quadrature of the transform.
 
-    Returns (P1, P2) each of shape (N,)
+    Parameters
+    ----------
+    f : ndarray, shape (n_phi, 2, N)
+        Characteristic-function values from ``_build_transform_vec``.
+    K : float or ndarray, shape (N,)
+    phi : ndarray, shape (n_phi,)
+    w : ndarray, shape (n_phi,)
+        Trapezoid weights (including step size).
+
+    Returns
+    -------
+    P1, P2 : ndarray, each shape (N,)
     """
     lnK = np.log(K)
     kernel = np.exp(-1j * phi * lnK) / (1j * phi)         # (n_phi,)
@@ -385,173 +313,190 @@ def compute_P_vec(f, K, phi, w):
     return P[0, :], P[1, :]
 
 
-# ---------- Precompute holder ----------
+# ─── Black-Scholes closed forms (public) ─────────────────────────────────────
 
-@dataclass
-class LLHPrecompute:
-    """Precomputed phi-grid, trapezoid weights, and RK4 coefficients for a given tau."""
-    tau: float
-    phi: np.ndarray
-    w: np.ndarray
-    coeffs: dict          # keys: 'C','D','E','F','G','H'
-    coeffs_stacked: np.ndarray   # (n_phi, 2, 6) pre-stacked for build_transform_vec
-    n_phi: int
+def price_call_bs(S, K=90, tau=1.0, r=0.05, vol=0.2):
+    """Black-Scholes European call price.
 
+    Parameters
+    ----------
+    S : float
+        Spot price.
+    K : float
+        Strike price.
+    tau : float
+        Time to maturity in years.
+    r : float
+        Risk-free rate.
+    vol : float
+        Constant volatility.
 
-@dataclass
-class ImprovedSteinStein:
-    """LLH stochastic volatility model: Monte Carlo simulation and European pricing."""
-    r: float
-    sigma0: float
-    theta0: float
-    rho: float
-    kappa: float
-    lam: float
-    nu: float
-    eta: float
-    seed: int | None = None
-
-    def simulate_prices(
-        self,
-        S0: float,
-        T: float,
-        n_steps_mc: int,
-        n_paths: int
-    ) -> dict:
-        """
-        Simulate n_paths price paths.
-
-        Returns: dict with dt, W, B, W2, sigma_hat, S (all arrays shape (n_paths, n_steps_mc + 1)).
-        """
-        dt = T / n_steps_mc
-        sqrt_dt = np.sqrt(dt)
-        rng = np.random.default_rng(self.seed)
-
-        # (i) Brownian for B
-        Zb = rng.standard_normal((n_paths, n_steps_mc))
-        dW, W = brownian_from_normals(Zb, dt)
-        B = gbm_from_formula(W, dt)
-
-        # (ii) Correlated Brownian motions for price and sigma drivers
-        Z1, Z2 = draw_correlated_normals(rng, n_paths, n_steps_mc, self.rho)
-        # Inline dW1 to avoid discarded cumsum allocation
-        dW1 = sqrt_dt * Z1
-        dW2, W2 = brownian_from_normals(Z2, dt)
-
-        # (iii) sigma_hat
-        sigma_hat = sigma_hat_from_components(
-            n_steps_mc, dt, self.kappa, self.sigma0, self.theta0, self.lam, self.nu, self.eta, W2, B
-        )
-
-        # (iv) prices — avoid S0 column concatenation
-        S = multiplicative_euler_prices(S0, self.r, sigma_hat, dW1, dt)
-        S_full = np.empty((S.shape[0], S.shape[1] + 1), dtype=float)
-        S_full[:, 0] = S0
-        S_full[:, 1:] = S
-
-        return {"dt": dt, "W": W, "B": B, "W2": W2, "sigma_hat": sigma_hat,
-                "S": S_full}
+    Returns
+    -------
+    float
+        Call price (intrinsic value if tau <= 0).
+    """
+    if tau <= 0:
+        return max(0.0, S - K)
+    v = vol * np.sqrt(tau)
+    d1 = (np.log(S/K) + (r + 0.5*vol*vol)*tau) / v
+    d2 = d1 - v
+    from scipy.stats import norm as _norm
+    return float(S * _norm.cdf(d1) - K * np.exp(-r*tau) * _norm.cdf(d2))
 
 
-    def llh_precompute_tau(self, tau, phi_max, n_phi, n_steps_ode, eps0=1e-6) -> LLHPrecompute:
-        """
-        Precompute φ-grid, trapezoid weights, and RK4 ODE coefficients at fixed τ.
+def price_put_bs(S, K=90, tau=1.0, r=0.05, vol=0.2):
+    """Black-Scholes European put price via put-call parity.
 
-        Uses the simplified trapezoid rule per Boyarchenko–Levendorskiĭ (Eq. 2.31):
-            w₀ = 1/2,  w_k = 1  for k>0.
-        """
-        phi = phi_grid(phi_max, n_phi, eps0)
-        dphi = phi_max / (n_phi - 1)
-        w = dphi * trap_weights(n_phi, simplified=True)
-        rhs = rhs_factory(phi, self.r, self.kappa, self.nu, self.lam, self.eta, self.rho)
-        coeffs = rk4_integrate(rhs, tau, n_steps_ode, n_phi)
+    Parameters
+    ----------
+    S, K, tau, r, vol : float
+        Same as ``price_call_bs``.
 
-        # Pre-stack coefficients for build_transform_vec
-        coeffs_stacked = np.stack(
-            [coeffs[k] for k in "CDEFGH"], axis=-1
-        )  # (n_phi, 2, 6)
-
-        return LLHPrecompute(tau=float(tau), phi=phi, w=w, coeffs=coeffs,
-                             coeffs_stacked=coeffs_stacked, n_phi=n_phi)
+    Returns
+    -------
+    float
+    """
+    return price_call_bs(S, K, tau, r, vol) - S + K * np.exp(-r * tau)
 
 
-    def price_call_llh(self, S, K, tau, vol, theta, phi_max=300.0, n_phi=513, n_steps_ode=128, pre=None, eps0=1e-6):
-        """
-        Vectorized European call prices under Lin–Lin–He for a fixed tau.
+# ─── MC pricing (public) ─────────────────────────────────────────────────────
 
-        Returns: np.ndarray of shape (N,), matching S.
-        """
-        S = np.asarray(S, dtype=float).reshape(-1)
-        vol = np.asarray(vol, dtype=float).reshape(-1)
-        theta = np.asarray(theta, dtype=float).reshape(-1)
-        if S.shape != vol.shape or S.shape != theta.shape:
-            raise ValueError("S, vol, theta must have the same shape")
+def price_call_mc(paths, K, T, r=None):
+    """Monte Carlo European call price from simulated terminal values.
 
-        if pre is None:
-            pre = self.llh_precompute_tau(tau, phi_max=phi_max, n_phi=n_phi, n_steps_ode=n_steps_ode, eps0=eps0)
+    Parameters
+    ----------
+    paths : ndarray, shape (n_paths, n_steps+1)
+        Simulated price paths; only the terminal column is used.
+    K : float
+        Strike price.
+    T : float
+        Time to maturity.
+    r : float
+        Risk-free rate.
 
-        # Use pre-stacked coefficients for efficiency
-        f = build_transform_vec(pre.coeffs_stacked, S, vol, theta, pre.phi)
-        P1, P2 = compute_P_vec(f, K, pre.phi, pre.w)
-        disc = np.exp(-self.r * tau)
-        return np.real(S * P1 - K * disc * P2)
-
-
-    def price_put_llh(self, S, K, tau, vol, theta, phi_max, n_phi, n_steps_ode, pre=None, eps0=1e-6):
-        """
-        Vectorized European put prices under Lin–Lin–He for a fixed tau (via put-call parity).
-        """
-        call = self.price_call_llh(S, K, tau, vol, theta, phi_max, n_phi, n_steps_ode, pre=pre, eps0=eps0)
-        return call - S + K * np.exp(-self.r * tau)
-
-
-    # ---------- MC European pricing ----------
-
-    def price_call_mc(self, sim_out, K):
-        """European call price via Monte Carlo on simulated paths."""
-        T = sim_out['dt'] * (sim_out['S'].shape[1] - 1)
-        return price_call_mc(sim_out['S'], K=K, T=T, r=self.r)
-
-    def price_put_mc(self, sim_out, K):
-        """European put price via Monte Carlo on simulated paths."""
-        T = sim_out['dt'] * (sim_out['S'].shape[1] - 1)
-        return price_put_mc(sim_out['S'], K=K, T=T, r=self.r)
+    Returns
+    -------
+    dict
+        Keys: 'price', 'std_err', 'ci_95' (tuple), 'n_paths'.
+    """
+    n_paths = paths.shape[0]
+    disc = np.exp(-r * T)
+    Y = disc * np.maximum(paths[:, -1] - K, 0.0)
+    price = Y.mean()
+    std_err = Y.std(ddof=1) / np.sqrt(n_paths)
+    ci95 = (price - 1.96*std_err, price + 1.96*std_err)
+    return {
+        'price': price,
+        'std_err': std_err,
+        'ci_95': ci95,
+        'n_paths': n_paths
+    }
 
 
-    # ---------- American pricing (delegates to amOptPricer) ----------
+def price_put_mc(paths, K, T, r=None):
+    """Monte Carlo European put price from simulated terminal values.
 
-    def price_american_put(self, sim_out, K, basis_order=3,
-                           basis_type='laguerre',
-                           use_cv=True, improved=True, ridge=0.0,
-                           euro_method='llh', floor_method='bs',
-                           phi_max=300.0, n_phi=513, n_steps_rk4=128, eps0=1e-6):
-        """American put price via LSM with optional Rasmussen control variates."""
-        import amOptPricer as aop
-        return aop.price_american_put_lsm_llh(
-            self, sim_out, K, basis_order=basis_order,
-            basis_type=basis_type,
-            use_cv=use_cv, improved=improved, ridge=ridge,
-            euro_method=euro_method, floor_method=floor_method,
-            phi_max=phi_max, n_phi=n_phi, n_steps_rk4=n_steps_rk4, eps0=eps0
-        )
+    Parameters
+    ----------
+    paths : ndarray, shape (n_paths, n_steps+1)
+        Simulated price paths; only the terminal column is used.
+    K : float
+        Strike price.
+    T : float
+        Time to maturity.
+    r : float
+        Risk-free rate.
+
+    Returns
+    -------
+    dict
+        Keys: 'price', 'std_err', 'ci_95' (tuple), 'n_paths'.
+    """
+    n_paths = paths.shape[0]
+    disc = np.exp(-r * T)
+    Y = disc * np.maximum(K - paths[:, -1], 0.0)
+    price = Y.mean()
+    std_err = Y.std(ddof=1) / np.sqrt(n_paths)
+    ci95 = (price - 1.96*std_err, price + 1.96*std_err)
+    return {
+        'price': price,
+        'std_err': std_err,
+        'ci_95': ci95,
+        'n_paths': n_paths
+    }
 
 
-    # ---------- European comparison (convenience wrapper) ----------
+# ─── Convenience / notebook utilities (public) ───────────────────────────────
 
-    def european_prices(self, S0=100.0, K=90.0, tau=1.0,
-                        n_steps_mc=252, n_paths=50000,
-                        phi_max=300.0, n_phi=513, n_steps_ode=128):
-        """Compare LLH analytical and MC European prices."""
-        return european_prices(self, S0=S0, K=K, tau=tau,
-                               n_steps_mc=n_steps_mc, n_paths=n_paths,
-                               phi_max=phi_max, n_phi=n_phi, n_steps_ode=n_steps_ode)
+def plot(paths, title="Simulated Price Paths"):
+    """Quick line plot of simulated price paths.
+
+    Parameters
+    ----------
+    paths : ndarray
+        Price paths (columns = time steps).
+    title : str
+    """
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    ax.plot(paths, color='#1f77b4', alpha=0.6, lw=0.8)
+    ax.set_title(title, fontsize=13)
+    ax.set_xlabel('Time steps')
+    ax.set_ylabel('Price')
+    ax.grid(True, ls=':', lw=0.6, alpha=0.7)
+    ax.margins(x=0)
+    fig.tight_layout()
+    plt.show()
+
+
+def test_lognormality(data):
+    """Kolmogorov-Smirnov test for log-normality of positive data.
+
+    Parameters
+    ----------
+    data : array-like
+        Sample values (non-positive entries are dropped).
+    """
+    data = data[data > 0]
+    shape, loc, scale = lognorm.fit(data, floc=0)
+    D, p_value = kstest(data, 'lognorm', args=(shape, loc, scale))
+
+    print(f"KS statistic: {D:.4f}, p-value: {p_value:.4g}")
+    if p_value > 0.05:
+        print("Fail to reject null: data may be lognormal.")
+    else:
+        print("Reject null: data is not lognormal.")
 
 
 def european_prices(model, S0=100.0, K=90.0, tau=1.0,
                     n_steps_mc=252, n_paths=50000,
                     phi_max=300.0, n_phi=513, n_steps_ode=128):
-    """
-    Compute European call and put prices under the LLH formula and via Monte Carlo.
+    """European call and put prices under both LLH closed-form and Monte Carlo.
+
+    Parameters
+    ----------
+    model : ImprovedSteinStein
+    S0 : float
+        Initial spot price.
+    K : float
+        Strike price.
+    tau : float
+        Time to maturity.
+    n_steps_mc : int
+        MC time discretization steps.
+    n_paths : int
+        Number of MC paths.
+    phi_max, n_phi, n_steps_ode : float, int, int
+        Quadrature / ODE integration settings.
+
+    Returns
+    -------
+    dict
+        Keys: 'llh_call', 'llh_put', 'mc_call', 'mc_call_ci',
+        'mc_put', 'mc_put_ci'.
     """
     res = model.simulate_prices(S0=S0, T=tau, n_steps_mc=n_steps_mc, n_paths=n_paths)
 
@@ -578,7 +523,18 @@ def european_prices(model, S0=100.0, K=90.0, tau=1.0,
 def compare_european_prices(model, S0=100.0, K=90.0, tau=1.0,
                             n_steps_mc=252, n_paths=50000,
                             phi_max=300.0, n_phi=513, n_steps_ode=128):
-    """Print European prices. Thin wrapper around european_prices."""
+    """Print LLH and MC European prices side-by-side.
+
+    Parameters
+    ----------
+    model : ImprovedSteinStein
+    S0, K, tau : float
+        Spot, strike, maturity.
+    n_steps_mc, n_paths : int
+        MC settings.
+    phi_max, n_phi, n_steps_ode : float, int, int
+        Quadrature / ODE settings.
+    """
     r = european_prices(model, S0=S0, K=K, tau=tau,
                         n_steps_mc=n_steps_mc, n_paths=n_paths,
                         phi_max=phi_max, n_phi=n_phi, n_steps_ode=n_steps_ode)
@@ -588,3 +544,273 @@ def compare_european_prices(model, S0=100.0, K=90.0, tau=1.0,
         f"European put LLH price:   {r['llh_put']},\n"
         f"European put MC price:    {r['mc_put']}, MC 95% CI: {r['mc_put_ci']}"
     )
+
+
+# ─── Main class ──────────────────────────────────────────────────────────────
+
+@dataclass
+class LLHPrecompute:
+    """Cached quadrature and ODE data for a fixed maturity tau.
+
+    Attributes
+    ----------
+    tau : float
+        Time to maturity for which coefficients were computed.
+    phi : ndarray, shape (n_phi,)
+        Quadrature grid in the transform variable.
+    w : ndarray, shape (n_phi,)
+        Trapezoid weights (including step size).
+    coeffs : dict
+        Keys 'C','D','E','F','G','H', each ndarray of shape (n_phi, 2).
+    coeffs_stacked : ndarray, shape (n_phi, 2, 6)
+        Same coefficients pre-stacked for ``_build_transform_vec``.
+    n_phi : int
+        Number of quadrature nodes.
+    """
+    tau: float
+    phi: np.ndarray
+    w: np.ndarray
+    coeffs: dict
+    coeffs_stacked: np.ndarray
+    n_phi: int
+
+
+@dataclass
+class ImprovedSteinStein:
+    """Lin-Lin-He (2024) improved Stein-Stein stochastic volatility model.
+
+    Provides Monte Carlo path simulation and closed-form European option
+    pricing via characteristic-function inversion.
+
+    Attributes
+    ----------
+    r : float
+        Risk-free interest rate.
+    sigma0 : float
+        Initial instantaneous volatility.
+    theta0 : float
+        Initial long-run volatility level.
+    rho : float
+        Correlation between asset and volatility Brownians.
+    kappa : float
+        Mean-reversion speed of the volatility process.
+    lam : float
+        Drift coefficient of the long-run volatility theta(t).
+    nu : float
+        Diffusion coefficient (vol-of-vol) driven by W2.
+    eta : float
+        Diffusion coefficient of theta(t) driven by geometric BM.
+    seed : int or None
+        Random seed for reproducible simulation.
+    """
+    r: float
+    sigma0: float
+    theta0: float
+    rho: float
+    kappa: float
+    lam: float
+    nu: float
+    eta: float
+    seed: int | None = None
+
+    def simulate_prices(
+        self,
+        S0: float,
+        T: float,
+        n_steps_mc: int,
+        n_paths: int
+    ) -> dict:
+        """Simulate LLH price and volatility paths via Euler discretization.
+
+        Parameters
+        ----------
+        S0 : float
+            Initial spot price.
+        T : float
+            Time horizon in years.
+        n_steps_mc : int
+            Number of Euler time steps.
+        n_paths : int
+            Number of Monte Carlo paths.
+
+        Returns
+        -------
+        dict
+            'dt'        : float -- step size T/n_steps_mc
+            'W'         : ndarray (n_paths, n_steps_mc) -- auxiliary BM
+            'B'         : ndarray (n_paths, n_steps_mc) -- geometric BM
+            'W2'        : ndarray (n_paths, n_steps_mc) -- volatility-driver BM
+            'sigma_hat' : ndarray (n_paths, n_steps_mc) -- instantaneous vol
+            'S'         : ndarray (n_paths, n_steps_mc+1) -- prices incl. S0
+        """
+        dt = T / n_steps_mc
+        sqrt_dt = np.sqrt(dt)
+        rng = np.random.default_rng(self.seed)
+
+        # (i) Brownian for B
+        Zb = rng.standard_normal((n_paths, n_steps_mc))
+        dW, W = _brownian_from_normals(Zb, dt)
+        B = _gbm_from_formula(W, dt)
+
+        # (ii) Correlated Brownian motions for price and sigma drivers
+        Z1, Z2 = _draw_correlated_normals(rng, n_paths, n_steps_mc, self.rho)
+        # Inline dW1 to avoid discarded cumsum allocation
+        dW1 = sqrt_dt * Z1
+        dW2, W2 = _brownian_from_normals(Z2, dt)
+
+        # (iii) sigma_hat
+        sigma_hat = _sigma_hat_from_components(
+            n_steps_mc, dt, self.kappa, self.sigma0, self.theta0, self.lam, self.nu, self.eta, W2, B
+        )
+
+        # (iv) prices — avoid S0 column concatenation
+        S = _multiplicative_euler_prices(S0, self.r, sigma_hat, dW1, dt)
+        S_full = np.empty((S.shape[0], S.shape[1] + 1), dtype=float)
+        S_full[:, 0] = S0
+        S_full[:, 1:] = S
+
+        return {"dt": dt, "W": W, "B": B, "W2": W2, "sigma_hat": sigma_hat,
+                "S": S_full}
+
+
+    def llh_precompute_tau(self, tau, phi_max, n_phi, n_steps_ode, eps0=1e-6) -> LLHPrecompute:
+        """Precompute quadrature grid and ODE coefficients for a fixed maturity.
+
+        Parameters
+        ----------
+        tau : float
+            Time to maturity.
+        phi_max : float
+            Upper bound of the phi integration grid.
+        n_phi : int
+            Number of quadrature nodes.
+        n_steps_ode : int
+            RK4 integration steps for the characteristic-exponent ODE.
+        eps0 : float
+            Small offset replacing phi=0 to avoid 1/phi singularity.
+
+        Returns
+        -------
+        LLHPrecompute
+        """
+        phi = _phi_grid(phi_max, n_phi, eps0)
+        dphi = phi_max / (n_phi - 1)
+        w = dphi * _trap_weights(n_phi, simplified=True)
+        rhs = _rhs_factory(phi, self.r, self.kappa, self.nu, self.lam, self.eta, self.rho)
+        coeffs = _rk4_integrate(rhs, tau, n_steps_ode, n_phi)
+
+        # Pre-stack coefficients for _build_transform_vec
+        coeffs_stacked = np.stack(
+            [coeffs[k] for k in "CDEFGH"], axis=-1
+        )  # (n_phi, 2, 6)
+
+        return LLHPrecompute(tau=float(tau), phi=phi, w=w, coeffs=coeffs,
+                             coeffs_stacked=coeffs_stacked, n_phi=n_phi)
+
+
+    def price_call_llh(self, S, K, tau, vol, theta, phi_max=300.0, n_phi=513, n_steps_ode=128, pre=None, eps0=1e-6):
+        """Vectorized European call prices under the LLH characteristic-function formula.
+
+        Parameters
+        ----------
+        S, vol, theta : float or array-like, shape (N,)
+            Spot prices, instantaneous vols, and long-run vols.
+        K : float
+            Strike price.
+        tau : float
+            Time to maturity.
+        phi_max, n_phi, n_steps_ode : float, int, int
+            Quadrature / ODE settings (ignored if *pre* is given).
+        pre : LLHPrecompute or None
+            Reusable precomputed coefficients for this tau.
+        eps0 : float
+            Phi-grid singularity offset.
+
+        Returns
+        -------
+        ndarray, shape (N,)
+        """
+        S = np.asarray(S, dtype=float).reshape(-1)
+        vol = np.asarray(vol, dtype=float).reshape(-1)
+        theta = np.asarray(theta, dtype=float).reshape(-1)
+        if S.shape != vol.shape or S.shape != theta.shape:
+            raise ValueError("S, vol, theta must have the same shape")
+
+        if pre is None:
+            pre = self.llh_precompute_tau(tau, phi_max=phi_max, n_phi=n_phi, n_steps_ode=n_steps_ode, eps0=eps0)
+
+        # Use pre-stacked coefficients for efficiency
+        f = _build_transform_vec(pre.coeffs_stacked, S, vol, theta, pre.phi)
+        P1, P2 = _compute_P_vec(f, K, pre.phi, pre.w)
+        disc = np.exp(-self.r * tau)
+        return np.real(S * P1 - K * disc * P2)
+
+
+    def price_put_llh(self, S, K, tau, vol, theta, phi_max, n_phi, n_steps_ode, pre=None, eps0=1e-6):
+        """Vectorized European put prices under LLH via put-call parity.
+
+        Parameters and returns follow ``price_call_llh``.
+        """
+        call = self.price_call_llh(S, K, tau, vol, theta, phi_max, n_phi, n_steps_ode, pre=pre, eps0=eps0)
+        return call - S + K * np.exp(-self.r * tau)
+
+
+    # ---------- MC European pricing ----------
+
+    def price_call_mc(self, sim_out, K):
+        """European call price via MC on pre-simulated paths.
+
+        Parameters
+        ----------
+        sim_out : dict
+            Output of ``simulate_prices``.
+        K : float
+            Strike price.
+
+        Returns
+        -------
+        dict
+            Same as module-level ``price_call_mc``.
+        """
+        T = sim_out['dt'] * (sim_out['S'].shape[1] - 1)
+        return price_call_mc(sim_out['S'], K=K, T=T, r=self.r)
+
+    def price_put_mc(self, sim_out, K):
+        """European put price via MC on pre-simulated paths.
+
+        Parameters
+        ----------
+        sim_out : dict
+            Output of ``simulate_prices``.
+        K : float
+            Strike price.
+
+        Returns
+        -------
+        dict
+            Same as module-level ``price_put_mc``.
+        """
+        T = sim_out['dt'] * (sim_out['S'].shape[1] - 1)
+        return price_put_mc(sim_out['S'], K=K, T=T, r=self.r)
+
+
+    # ---------- American pricing (delegates to amerPrice) ----------
+
+    def price_american_put(self, sim_out, K, basis_order=3,
+                           basis_type='laguerre',
+                           use_cv=True, improved=True, ridge=0.0,
+                           euro_method='llh', floor_method='bs',
+                           phi_max=300.0, n_phi=513, n_steps_rk4=128, eps0=1e-6):
+        """American put price via LSM with optional Rasmussen control variates.
+
+        Delegates to ``amOptPricer.price_american_put_lsm_llh``; see that
+        function for full parameter and return documentation.
+        """
+        import amerPrice as ap
+        return ap.price_american_put_lsm_llh(
+            self, sim_out, K, basis_order=basis_order,
+            basis_type=basis_type,
+            use_cv=use_cv, improved=improved, ridge=ridge,
+            euro_method=euro_method, floor_method=floor_method,
+            phi_max=phi_max, n_phi=n_phi, n_steps_rk4=n_steps_rk4, eps0=eps0
+        )

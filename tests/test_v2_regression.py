@@ -14,7 +14,7 @@ sys.path.insert(0, "src")
 import priceModels_v0 as pm_v0
 import priceModels as pm
 import amOptPricer_v0 as aop_v0
-import amOptPricer as aop
+import amerPrice as ap
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────
@@ -48,7 +48,7 @@ class TestV1V2CVModeAgreement:
         m, sim = _make_model_sim(TABLE1, S0, T, n_steps, 3000)
         r1 = aop_v0.price_american_put_lsm_llh(m, sim, K, use_cv=True,
                                                  euro_method='bs', ridge=1e-5)
-        r2 = aop.price_american_put_lsm_llh(m, sim, K, use_cv=True,
+        r2 = ap.price_american_put_lsm_llh(m, sim, K, use_cv=True,
                                                  euro_method='bs', ridge=1e-5)
         assert r1['price'] == pytest.approx(r2['price'], abs=1e-10)
         assert r1['price_imp'] == pytest.approx(r2['price_imp'], abs=1e-10)
@@ -59,7 +59,7 @@ class TestV1V2CVModeAgreement:
         m, sim = _make_model_sim(TABLE1, S0, 1.0, 52, 3000)
         r1 = aop_v0.price_american_put_lsm_llh(m, sim, K, use_cv=True,
                                                  euro_method='mc1', ridge=1e-5)
-        r2 = aop.price_american_put_lsm_llh(m, sim, K, use_cv=True,
+        r2 = ap.price_american_put_lsm_llh(m, sim, K, use_cv=True,
                                                  euro_method='mc1', ridge=1e-5)
         assert r1['price'] == pytest.approx(r2['price'], abs=1e-10)
         assert r1['price_imp'] == pytest.approx(r2['price_imp'], abs=1e-10)
@@ -70,7 +70,7 @@ class TestV1V2CVModeAgreement:
         r1 = aop_v0.price_american_put_lsm_llh(m, sim, K, use_cv=True,
                                                  euro_method='llh', ridge=1e-5,
                                                  phi_max=300, n_phi=513, n_steps_rk4=128)
-        r2 = aop.price_american_put_lsm_llh(m, sim, K, use_cv=True,
+        r2 = ap.price_american_put_lsm_llh(m, sim, K, use_cv=True,
                                                  euro_method='llh', ridge=1e-5,
                                                  phi_max=300, n_phi=513, n_steps_rk4=128)
         # LLH mode: ITM-only optimization introduces small numerical differences
@@ -82,7 +82,7 @@ class TestV1V2CVModeAgreement:
         m, sim = _make_model_sim(TABLE2, 100.0, 1.0, 52, 3000)
         r1 = aop_v0.price_american_put_lsm_llh(m, sim, K, use_cv=True,
                                                  euro_method='bs', ridge=1e-5)
-        r2 = aop.price_american_put_lsm_llh(m, sim, K, use_cv=True,
+        r2 = ap.price_american_put_lsm_llh(m, sim, K, use_cv=True,
                                                  euro_method='bs', ridge=1e-5)
         assert r1['price_imp'] == pytest.approx(r2['price_imp'], abs=1e-10)
 
@@ -96,7 +96,7 @@ class TestUseCvFalseFloor:
         """v2 BS floor should produce prices within SE of v1 LLH floor."""
         m, sim = _make_model_sim(TABLE1, S0, T, n_steps, 5000)
         r1 = aop_v0.price_american_put_lsm_llh(m, sim, K, use_cv=False, ridge=1e-5)
-        r2 = aop.price_american_put_lsm_llh(m, sim, K, use_cv=False, ridge=1e-5)
+        r2 = ap.price_american_put_lsm_llh(m, sim, K, use_cv=False, ridge=1e-5)
         # BS floor should match LLH floor within 2 standard errors
         tol = 2 * max(r1['std_err'], r2['std_err'])
         assert abs(r1['price'] - r2['price']) < tol, \
@@ -109,9 +109,9 @@ class TestFloorMethodEquivalence:
     @pytest.mark.parametrize("S0", [85.0, 100.0, 115.0])
     def test_bs_vs_llh_floor(self, S0):
         m, sim = _make_model_sim(TABLE1, S0, 1/12, 22, 3000)
-        r_bs = aop.price_american_put_lsm_llh(
+        r_bs = ap.price_american_put_lsm_llh(
             m, sim, K, use_cv=False, ridge=1e-5, floor_method='bs')
-        r_llh = aop.price_american_put_lsm_llh(
+        r_llh = ap.price_american_put_lsm_llh(
             m, sim, K, use_cv=False, ridge=1e-5, floor_method='llh')
         tol = 2 * max(r_bs['std_err'], r_llh['std_err'])
         assert abs(r_bs['price'] - r_llh['price']) < tol
@@ -124,7 +124,7 @@ class TestAmericanPutBounds:
     @pytest.mark.parametrize("T,n_steps", [(1/12, 22), (1.0, 52)])
     def test_eep_nonnegative_cv_bs(self, S0, T, n_steps):
         m, sim = _make_model_sim(TABLE1, S0, T, n_steps, 5000)
-        res = aop.price_american_put_lsm_llh(m, sim, K, use_cv=True,
+        res = ap.price_american_put_lsm_llh(m, sim, K, use_cv=True,
                                                   euro_method='bs', ridge=1e-5)
         am_price = res.get('price_imp', res['price'])
 
@@ -151,10 +151,10 @@ class TestOLSFitPredictMulti:
         ys = [rng.standard_normal(n_itm) for _ in range(4)]
 
         # Individual calls
-        preds_individual = [aop._ols_fit_predict(Phi, y, Phi_all, ridge=1e-5) for y in ys]
+        preds_individual = [ap._ols_fit_predict(Phi, y, Phi_all, ridge=1e-5) for y in ys]
         # Multi call
         Y_mat = np.column_stack(ys)
-        preds_multi = aop._ols_fit_predict_multi(Phi, Y_mat, Phi_all, ridge=1e-5)
+        preds_multi = ap._ols_fit_predict_multi(Phi, Y_mat, Phi_all, ridge=1e-5)
 
         for i, pred_ind in enumerate(preds_individual):
             np.testing.assert_allclose(preds_multi[:, i], pred_ind, rtol=1e-10,
@@ -169,9 +169,9 @@ class TestOLSFitPredictMulti:
         Phi_all = rng.standard_normal((n_all, p))
         ys = [rng.standard_normal(n_itm) for _ in range(4)]
 
-        preds_individual = [aop._ols_fit_predict(Phi, y, Phi_all, ridge=0.0) for y in ys]
+        preds_individual = [ap._ols_fit_predict(Phi, y, Phi_all, ridge=0.0) for y in ys]
         Y_mat = np.column_stack(ys)
-        preds_multi = aop._ols_fit_predict_multi(Phi, Y_mat, Phi_all, ridge=0.0)
+        preds_multi = ap._ols_fit_predict_multi(Phi, Y_mat, Phi_all, ridge=0.0)
 
         for i, pred_ind in enumerate(preds_individual):
             np.testing.assert_allclose(preds_multi[:, i], pred_ind, rtol=1e-6,
@@ -181,7 +181,7 @@ class TestOLSFitPredictMulti:
         Phi = np.empty((0, 4))
         Phi_all = np.ones((100, 4))
         Y_mat = np.empty((0, 3))
-        result = aop._ols_fit_predict_multi(Phi, Y_mat, Phi_all)
+        result = ap._ols_fit_predict_multi(Phi, Y_mat, Phi_all)
         assert result.shape == (100, 3)
         np.testing.assert_array_equal(result, 0.0)
 
@@ -191,7 +191,7 @@ class TestLaguerreBasis:
 
     def test_known_values(self):
         x = np.array([0.0, 0.5, 1.0, 2.0])
-        Phi = aop._laguerre_basis(x, order=2)
+        Phi = ap._laguerre_basis(x, order=2)
         # L_0(x) = 1
         np.testing.assert_allclose(Phi[:, 0], 1.0)
         # L_1(x) = 1 - x
@@ -201,7 +201,7 @@ class TestLaguerreBasis:
 
     def test_shape(self):
         x = np.linspace(0.5, 1.5, 100)
-        Phi = aop._laguerre_basis(x, order=3)
+        Phi = ap._laguerre_basis(x, order=3)
         assert Phi.shape == (100, 4)
 
 

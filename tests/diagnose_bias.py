@@ -11,7 +11,7 @@ import numpy as np
 import sys
 sys.path.insert(0, '/home/ramiuness/Documents/study/umontreal/myCourses/amerOptionsPricing/project/code')
 import priceModels as pm
-import amOptPricer_corrected as aop
+import amerPrice as ap
 from scipy.stats import norm
 
 print("=" * 80)
@@ -55,7 +55,7 @@ print(f"Difference:     {llh_price - bs_analytical:.6f} ({(llh_price/bs_analytic
 
 # MC simulation
 res_bs = model_bs.simulate_prices(S0=S0, T=tau, n_steps_mc=252, n_paths=500_000)
-mc_result = aop.price_call_mc(res_bs['S'], K=K, T=tau, r=r)
+mc_result = ap.price_call_mc(res_bs['S'], K=K, T=tau, r=r)
 print(f"MC simulation:  {mc_result['price']:.6f} ± {np.diff(mc_result['ci_95'])[0]/2:.6f}")
 
 if abs(llh_price - bs_analytical) / bs_analytical > 0.05:
@@ -90,11 +90,11 @@ print(f"\nLLH formula:    {llh_stoch:.6f}")
 print("\nMC simulation (converging)...")
 for n_paths in [50_000, 100_000, 250_000]:
     res_llh = model_llh.simulate_prices(S0=S0, T=tau, n_steps_mc=252, n_paths=n_paths)
-    mc_result = aop.price_call_mc(res_llh['S'], K=K, T=tau, r=model_llh.r)
+    mc_result = ap.price_call_mc(res_llh['S'], K=K, T=tau, r=model_llh.r)
     print(f"  n={n_paths:7d}: {mc_result['price']:.6f} ± {np.diff(mc_result['ci_95'])[0]/2:.4f}")
 
 res_llh = model_llh.simulate_prices(S0=S0, T=tau, n_steps_mc=252, n_paths=250_000)
-mc_result = aop.price_call_mc(res_llh['S'], K=K, T=tau, r=model_llh.r)
+mc_result = ap.price_call_mc(res_llh['S'], K=K, T=tau, r=model_llh.r)
 mc_price = mc_result['price']
 
 bias_pct = (llh_stoch - mc_price) / mc_price * 100
@@ -124,7 +124,7 @@ for name, params in test_configs:
         phi_max=300.0, n_phi=513, n_steps_ode=128
     ).item()
     res_test = model_test.simulate_prices(S0=S0, T=tau, n_steps_mc=252, n_paths=100_000)
-    mc_test = aop.price_call_mc(res_test['S'], K=K, T=tau, r=model_test.r)['price']
+    mc_test = ap.price_call_mc(res_test['S'], K=K, T=tau, r=model_test.r)['price']
 
     print(f"\n{name}:")
     print(f"  LLH: {llh_test:.4f}, MC: {mc_test:.4f}, Bias: {(llh_test-mc_test)/mc_test*100:.1f}%")

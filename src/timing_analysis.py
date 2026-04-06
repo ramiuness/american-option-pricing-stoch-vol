@@ -19,7 +19,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 import priceModels as pm
-import amOptPricer as aop
+import amerPrice as ap
 
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'figs')
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -49,13 +49,14 @@ SEED = 42
 
 
 def _savefig(fig, name):
+    """Save figure to the output directory and close it."""
     fig.savefig(os.path.join(OUTPUT_DIR, name))
     plt.close(fig)
     print(f"  Saved {name}")
 
 
 def _time_stages(n_paths, n_steps_mc, n_phi, n_steps_rk4, seed=SEED):
-    """Time each stage of LSM+CV-LLH separately."""
+    """Time each stage (simulation, ODE precomputation, backward loop) of LSM+CV-LLH."""
     model = pm.ImprovedSteinStein(**PARAMS, seed=seed)
 
     # 1. Simulation
@@ -76,17 +77,17 @@ def _time_stages(n_paths, n_steps_mc, n_phi, n_steps_rk4, seed=SEED):
 
     # 3. Full pricer
     t0 = time.perf_counter()
-    result = aop.price_american_put_lsm_llh(
+    result = ap.price_american_put_lsm_llh(
         model, sim, K=K_STRIKE, use_cv=True, euro_method='llh',
-        ridge=1e-5, phi_max=300.0, n_phi=n_phi, n_steps_rk4=n_steps_rk4)
+        phi_max=300.0, n_phi=n_phi, n_steps_rk4=n_steps_rk4)
     t_pricer = time.perf_counter() - t0
 
     t_backward = max(0, t_pricer - t_ode)
 
     # 4. Plain LSM (reuse same sim)
     t0 = time.perf_counter()
-    res_plain = aop.price_american_put_lsm_llh(
-        model, sim, K=K_STRIKE, use_cv=False, ridge=1e-5)
+    res_plain = ap.price_american_put_lsm_llh(
+        model, sim, K=K_STRIKE, use_cv=False)
     t_plain_backward = time.perf_counter() - t0
 
     return {
@@ -103,20 +104,20 @@ def _time_stages(n_paths, n_steps_mc, n_phi, n_steps_rk4, seed=SEED):
 
 
 def _time_method(method, n_paths, n_steps_mc, seed=SEED, **kw):
-    """Time a single method end-to-end. Returns (seconds, result_dict)."""
+    """Time a single pricing method ('plain', 'bs', or 'llh') end-to-end."""
     model = pm.ImprovedSteinStein(**PARAMS, seed=seed)
     sim = model.simulate_prices(S0=S0, T=T, n_steps_mc=n_steps_mc, n_paths=n_paths)
     t0 = time.perf_counter()
     if method == 'plain':
-        res = aop.price_american_put_lsm_llh(model, sim, K=K_STRIKE,
-                                              use_cv=False, ridge=1e-5)
+        res = ap.price_american_put_lsm_llh(model, sim, K=K_STRIKE,
+                                              use_cv=False)
     elif method == 'bs':
-        res = aop.price_american_put_lsm_llh(model, sim, K=K_STRIKE,
-                                              use_cv=True, euro_method='bs', ridge=1e-5)
+        res = ap.price_american_put_lsm_llh(model, sim, K=K_STRIKE,
+                                              use_cv=True, euro_method='bs')
     elif method == 'llh':
-        res = aop.price_american_put_lsm_llh(model, sim, K=K_STRIKE,
+        res = ap.price_american_put_lsm_llh(model, sim, K=K_STRIKE,
                                               use_cv=True, euro_method='llh',
-                                              ridge=1e-5, **kw)
+                                              **kw)
     return time.perf_counter() - t0, res
 
 
@@ -125,7 +126,7 @@ def _time_method(method, n_paths, n_steps_mc, seed=SEED, **kw):
 # ===================================================================
 
 def plot_stage_breakdown():
-    """Horizontal bar chart comparing Plain LSM and CV-LLH stage breakdown."""
+    """Generate horizontal bar chart comparing Plain LSM and CV-LLH wall-time breakdown."""
     s = _time_stages(N_DEFAULT, M_DEFAULT, P_DEFAULT, K_RK4)
 
     # Two groups with a gap: Plain LSM (top), CV-LLH (bottom)
@@ -180,7 +181,7 @@ def plot_stage_breakdown():
 
 def _scaling_plot(param_name, param_sym, values, fixed_label,
                   color, marker, fname, vary_fn):
-    """Generic scaling plot: vary one parameter, measure total wall time."""
+    """Generate a scaling plot: vary one parameter and measure total wall time."""
     times = []
     for v in values:
         s = vary_fn(v)
@@ -199,6 +200,7 @@ def _scaling_plot(param_name, param_sym, values, fixed_label,
 
 
 def plot_scaling_N():
+    """Plot wall-time scaling with number of MC paths N."""
     _scaling_plot('N', '$N$ (paths)', [1000, 2000, 5000, 10000, 20000, 50000],
                   f'$M={M_DEFAULT}$, $P={P_DEFAULT}$',
                   '#d62728', 'o', 'fig_scaling_N.png',
@@ -206,6 +208,7 @@ def plot_scaling_N():
 
 
 def plot_scaling_M():
+    """Plot wall-time scaling with number of exercise dates M."""
     _scaling_plot('M', '$M$ (exercise dates)', [12, 22, 52, 104, 252],
                   f'$N={N_DEFAULT:,}$, $P={P_DEFAULT}$',
                   '#1f77b4', 's', 'fig_scaling_M.png',
@@ -213,6 +216,7 @@ def plot_scaling_M():
 
 
 def plot_scaling_P():
+    """Plot wall-time scaling with number of quadrature nodes P."""
     _scaling_plot('P', '$P$ (quadrature nodes)', [65, 129, 257, 513, 1025],
                   f'$N={N_DEFAULT:,}$, $M={M_DEFAULT}$',
                   '#2ca02c', '^', 'fig_scaling_P.png',
@@ -224,7 +228,7 @@ def plot_scaling_P():
 # ===================================================================
 
 def plot_method_comparison():
-    """Grouped bar chart: wall time and SE for Plain / CV-BS / CV-LLH."""
+    """Generate grouped bar chart comparing wall time and SE for Plain, CV-BS, and CV-LLH."""
     methods = [('plain', 'Plain LSM', N_DEFAULT),
                ('bs',    'CV-BS',     N_DEFAULT),
                ('llh',   'CV-LLH',    5000)]
@@ -268,7 +272,7 @@ def plot_method_comparison():
 # ===================================================================
 
 def plot_scaling_all():
-    """Single 1x3 figure combining N, M, P scaling experiments."""
+    """Generate combined 1x3 figure showing wall-time scaling with N, M, and P."""
     configs = [
         ('N', '$N$ (paths)', [1000, 2000, 5000, 10000, 20000, 50000],
          f'$M={M_DEFAULT}$, $P={P_DEFAULT}$', '#d62728', 'o',
@@ -301,7 +305,8 @@ def plot_scaling_all():
 
 # ===================================================================
 
-if __name__ == '__main__':
+def main():
+    """Entry point: generate all timing analysis figures."""
     plt.rcParams.update(STYLE)
 
     print("=== Stage breakdown ===")
@@ -311,3 +316,7 @@ if __name__ == '__main__':
     print("\n=== Method comparison ===")
     plot_method_comparison()
     print("\nDone.")
+
+
+if __name__ == '__main__':
+    main()

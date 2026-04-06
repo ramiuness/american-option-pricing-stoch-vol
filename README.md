@@ -44,13 +44,12 @@ Reference parameters from Lin-Lin-He:
 ```
 src/
   priceModels.py        # LLH simulation + European pricing (ODE/quadrature + BS/MC)
-  amOptPricer.py        # LSM + Rasmussen control variates; Laguerre and Gaussian RBF bases
+  amerPrice.py          # LSM + Rasmussen control variates; Laguerre and Gaussian RBF bases
   calibrate.py          # LLH calibration to market options (DE + L-BFGS-B)
   reporting.py          # Notebook presentation helpers
   generate_plots.py     # Plot generation for European and American pricing reports
   timing_analysis.py    # Empirical timing analysis of LSM+CV-LLH (scaling, stage breakdown)
   testing.py            # Regression-basis and CI comparison utilities
-  *_v0.py               # Archived originals (gitignored)
 
 notebooks/
   european_pricing.ipynb              # European price validation + S&Z Table 2 comparison
@@ -65,6 +64,10 @@ reports/
   llh-formula.pdf             # Theoretical derivation of the European price formula
   llh-formula-report.pdf      # Extended report with European pricing results
   pricing-project.pdf         # Project report
+  american_pricing_report.tex # American pricing report (LSM + CV results, VR, EEP)
+  american_pricing_report.pdf # Compiled American pricing report
+  difficulties_report.tex     # Numerical difficulties analysis (T2 parameter regime)
+  difficulties_report.pdf     # Compiled difficulties report
 ```
 
 ---
@@ -84,8 +87,8 @@ where P1, P2 are computed via the characteristic functions f1, f2 obtained by so
 ### American Put Price (LSM + CV)
 
 The Longstaff-Schwartz algorithm estimates continuation values at each exercise date by regression on a basis of the current spot. Two basis types are supported via `basis_type`:
-- **Laguerre** (`basis_type='laguerre'`): Laguerre polynomials of order `basis_order` (default 3, giving 4 basis functions)
-- **Gaussian** (`basis_type='gaussian'`): Gaussian RBFs at `basis_order` quantile-grid centers (default 15), Silverman bandwidth, adaptive per time step
+- **Laguerre** (`basis_type='laguerre'`): Laguerre polynomials of order `basis_order` (default 2, giving 3 basis functions)
+- **Gaussian** (`basis_type='gaussian'`): Gaussian RBFs at `basis_order` quantile-grid centres (default 5), median-spacing bandwidth, recomputed per time step
 
 Three European put estimators are available as Rasmussen control variates:
 - **LLH** (`euro_method='llh'`): exact LLH European put via ODE/quadrature (slow, best VR)
@@ -101,7 +104,7 @@ import sys
 sys.path.insert(0, 'src')
 
 import priceModels as pm
-import amOptPricer as aop
+import amerPrice as ap
 
 # Create model with Table 2 parameters
 model = pm.ImprovedSteinStein(
@@ -113,17 +116,9 @@ model = pm.ImprovedSteinStein(
 sim = model.simulate_prices(S0=100.0, T=1.0, n_steps_mc=52, n_paths=10_000)
 
 # Price American put via LSM + control variates
-result = aop.price_american_put_lsm_llh(model, sim, K=100.0, use_cv=True, euro_method='bs')
+result = ap.price_american_put_lsm_llh(model, sim, K=100.0, use_cv=True, euro_method='bs')
 print(f"Price: {result['price_imp']:.4f}, SE: {result['std_err_imp']:.4f}")
 ```
-
----
-
-## Theoretical Notes
-
-### Ansatz Non-Closure
-
-The covariance matrix of (sigma, theta) is **quadratic** in the state, not affine. This means the exponential-quadratic ansatz used to derive the characteristic function ODEs in the LLH paper is mathematically unjustified. `notebooks/char_func_symbolic.ipynb` proves this symbolically: the residual P = L[y]/y has total degree **4** in (sigma, theta) for the full LLH PDE, collapsing to degree 2 only in the Stein-Stein limit. The ODE system from LLH is therefore an approximation.
 
 ---
 

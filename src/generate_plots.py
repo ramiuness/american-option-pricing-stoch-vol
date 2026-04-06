@@ -16,7 +16,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 import priceModels as pm
-import amOptPricer as aop
+import amerPrice as ap
 
 # ── Style ──
 STYLE = {
@@ -68,21 +68,25 @@ MC_BASE_SEEDS = {
 
 
 def _ensure_output_dir():
+    """Create the output directory for figures if it does not exist."""
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
 def _savefig(fig, name):
+    """Save figure to OUTPUT_DIR and close it to free memory."""
     fig.savefig(os.path.join(OUTPUT_DIR, name))
     plt.close(fig)
 
 
 def _make_model(name, seed=123, **overrides):
+    """Instantiate an ImprovedSteinStein model from a named parameter set."""
     params = dict(PARAM_SETS[name], seed=seed)
     params.update(overrides)
     return pm.ImprovedSteinStein(**params)
 
 
 def _moneyness_label(S0, K, option_type='call'):
+    """Return 'ITM', 'ATM', or 'OTM' given spot, strike, and option type."""
     if option_type == 'put':
         if S0 < K:
             return 'ITM'
@@ -98,12 +102,14 @@ def _moneyness_label(S0, K, option_type='call'):
 
 
 def _k_panel_label(K, S0_values, option_type='call'):
+    """Build a panel title like '$K = 100$ (ATM)' using the median S0."""
     S0_mid = np.median(S0_values)
     ml = _moneyness_label(S0_mid, K, option_type)
     return f'$K = {K:.0f}$ ({ml})'
 
 
 def _moneyness_label_fixed(S0, K, option_type='call'):
+    """Build a label like '$S_0=100, K=100$ (ATM)' for a fixed (S0, K) pair."""
     ml = _moneyness_label(S0, K, option_type)
     return f'$S_0={S0:.0f},\\ K={K:.0f}$ ({ml})'
 
@@ -117,10 +123,10 @@ def _moneyness_label_fixed(S0, K, option_type='call'):
 def plot_mc_convergence(model, label, pset_name,
                         S0_values=(70.0, 95.0, 110.0),
                         K=100.0, tau=TAU, n_steps_mc=52,
-                        n_paths_values=(200, 500, 1000, 5000, 10000, 50000, 100000),
+                        n_paths_values=(200, 500, 1000, 5000, 10000, 50000),
                         n_seeds=10, base_seed=100,
                         phi_max=300.0, n_phi=513, n_steps_ode=128):
-
+    """Plot MC call price convergence to the LLH formula across path counts."""
     pre = model.llh_precompute_tau(tau, phi_max, n_phi, n_steps_ode)
     n_panels = len(S0_values)
     mid = n_panels // 2
@@ -184,8 +190,9 @@ def plot_mc_convergence(model, label, pset_name,
 def _compute_mc_llh_grid(model,
                          S0_values=(90.0, 95.0, 100.0, 105.0, 110.0),
                          K_values=(80.0, 100.0, 120.0),
-                         tau=TAU, n_steps_mc=52, n_paths=100_000,
+                         tau=TAU, n_steps_mc=52, n_paths=50_000,
                          phi_max=300.0, n_phi=513, n_steps_ode=128):
+    """Compute LLH formula and MC call prices over an (S0, K) grid."""
     pre = model.llh_precompute_tau(tau, phi_max, n_phi, n_steps_ode)
     results = {}
     for S0 in S0_values:
@@ -207,7 +214,7 @@ def plot_mc_vs_llh_price(model, grid_data, label, pset_name,
                          S0_values=(90.0, 95.0, 100.0, 105.0, 110.0),
                          K_values=(80.0, 100.0, 120.0),
                          tau=TAU):
-
+    """Multi-panel figure: European call LLH formula vs MC price across S0."""
     n_panels = len(K_values)
     fig, axes = plt.subplots(1, n_panels, figsize=(14, 4.5), sharey=False)
 
@@ -245,7 +252,7 @@ def plot_mc_vs_llh_bias(model, grid_data, label, pset_name,
                         S0_values=(90.0, 95.0, 100.0, 105.0, 110.0),
                         K_values=(80.0, 100.0, 120.0),
                         tau=TAU):
-
+    """Multi-panel figure: MC relative bias against the LLH formula across S0."""
     n_panels = len(K_values)
     fig, axes = plt.subplots(1, n_panels, figsize=(14, 4.5), sharey=True)
 
@@ -284,7 +291,7 @@ def plot_sz_vs_llh(pset_name, label,
                    S0_values=(90.0, 95.0, 100.0, 105.0, 110.0),
                    K=100.0, tau=TAU,
                    phi_max=300.0, n_phi=513, n_steps_ode=128):
-
+    """Plot European call price: full LLH model vs Schobel-Zhu limit."""
     model_llh = _make_model(pset_name)
     model_sz = _make_model(pset_name, lam=0.0, eta=0.0)
 
@@ -328,7 +335,7 @@ def plot_llh_vs_sz_lambda(pset_name, label,
                           K_values=(70.0, 100.0, 120.0),
                           tau=TAU,
                           phi_max=300.0, n_phi=513, n_steps_ode=128):
-
+    """Multi-panel figure: LLH call price sensitivity to lambda vs S&Z reference."""
     model_sz = _make_model(pset_name, lam=0.0, eta=0.0)
     pre_sz = model_sz.llh_precompute_tau(tau, phi_max, n_phi, n_steps_ode)
 
@@ -381,7 +388,7 @@ def plot_llh_lambda_eta_layers(pset_name, label,
                                K_values=(70.0, 100.0, 120.0),
                                tau=TAU,
                                phi_max=300.0, n_phi=513, n_steps_ode=128):
-
+    """Multi-panel figure: joint sensitivity of the LLH price to lambda and eta."""
     colors = ['#1f77b4', '#ff7f0e', '#2ca02c']
 
     n_panels = len(K_values)
@@ -452,12 +459,12 @@ def _compute_american_grid(pset_name, seed=42):
                                         n_paths=AM_N_PATHS)
 
             mc_put = pm.price_put_mc(sim['S'], K=AM_K, T=T, r=model.r)
-            res_plain = aop.price_american_put_lsm_llh(
-                model, sim, AM_K, use_cv=False, ridge=1e-5)
-            res_bs = aop.price_american_put_lsm_llh(
-                model, sim, AM_K, use_cv=True, euro_method='bs', ridge=1e-5)
-            res_llh = aop.price_american_put_lsm_llh(
-                model, sim, AM_K, use_cv=True, euro_method='llh', ridge=1e-5,
+            res_plain = ap.price_american_put_lsm_llh(
+                model, sim, AM_K, use_cv=False)
+            res_bs = ap.price_american_put_lsm_llh(
+                model, sim, AM_K, use_cv=True, euro_method='bs')
+            res_llh = ap.price_american_put_lsm_llh(
+                model, sim, AM_K, use_cv=True, euro_method='llh',
                 **AM_LLH_PARAMS)
 
             rows.append({
@@ -498,14 +505,14 @@ def plot_american_put_panels(pset_name, label, horizon_key,
         for K in K_values:
             mc_put = pm.price_put_mc(sim['S'], K=K, T=T, r=model.r)['price']
 
-            res_plain = aop.price_american_put_lsm_llh(
-                model, sim, K, use_cv=False, ridge=1e-5)
+            res_plain = ap.price_american_put_lsm_llh(
+                model, sim, K, use_cv=False)
 
-            res_bs = aop.price_american_put_lsm_llh(
-                model, sim, K, use_cv=True, euro_method='bs', ridge=1e-5)
+            res_bs = ap.price_american_put_lsm_llh(
+                model, sim, K, use_cv=True, euro_method='bs')
 
-            res_llh = aop.price_american_put_lsm_llh(
-                model, sim, K, use_cv=True, euro_method='llh', ridge=1e-5,
+            res_llh = ap.price_american_put_lsm_llh(
+                model, sim, K, use_cv=True, euro_method='llh',
                 phi_max=phi_max, n_phi=n_phi, n_steps_rk4=n_steps_rk4)
 
             data[(S0, K)] = {
@@ -734,11 +741,10 @@ def plot_american_bs_limit(n_paths=10_000, seed=42):
     for S0 in AM_S0_GRID:
         sim = model.simulate_prices(S0=S0, T=T, n_steps_mc=n_steps_mc, n_paths=n_paths)
         mc_put = pm.price_put_mc(sim['S'], K=AM_K, T=T, r=model.r)
-        res_plain = aop.price_american_put_lsm_llh(model, sim, AM_K,
-                                                    use_cv=False, ridge=1e-5)
-        res_bs = aop.price_american_put_lsm_llh(model, sim, AM_K,
-                                                  use_cv=True, euro_method='bs',
-                                                  ridge=1e-5)
+        res_plain = ap.price_american_put_lsm_llh(model, sim, AM_K,
+                                                    use_cv=False)
+        res_bs = ap.price_american_put_lsm_llh(model, sim, AM_K,
+                                                  use_cv=True, euro_method='bs')
         s0_list.append(S0)
         mc_list.append(mc_put['price'])
         lsm_list.append(res_plain['price'])
@@ -788,7 +794,7 @@ def plot_american_bs_limit(n_paths=10_000, seed=42):
 def plot_mc_path_convergence(pset_name, label,
                              S0_cases=((90.0, 100.0, 'ITM'), (100.0, 80.0, 'OTM')),
                              T=1.0, n_steps_mc=52,
-                             N_values=(10_000, 50_000, 100_000, 250_000, 500_000),
+                             N_values=(1_000, 5_000, 10_000, 25_000, 50_000),
                              base_seed=100):
     """
     Two figures (price convergence + EEP convergence) showing the effect of
@@ -803,10 +809,10 @@ def plot_mc_path_convergence(pset_name, label,
             model = _make_model(pset_name, seed=base_seed)
             sim = model.simulate_prices(S0=S0, T=T, n_steps_mc=n_steps_mc, n_paths=n)
             mc_put = pm.price_put_mc(sim['S'], K=K_case, T=T, r=model.r)['price']
-            res_plain = aop.price_american_put_lsm_llh(
-                model, sim, K_case, use_cv=False, ridge=1e-5)
-            res_bs = aop.price_american_put_lsm_llh(
-                model, sim, K_case, use_cv=True, euro_method='bs', ridge=1e-5)
+            res_plain = ap.price_american_put_lsm_llh(
+                model, sim, K_case, use_cv=False)
+            res_bs = ap.price_american_put_lsm_llh(
+                model, sim, K_case, use_cv=True, euro_method='bs')
             data[s0_label].append({
                 'N': n,
                 'mc_put': mc_put,
@@ -890,6 +896,7 @@ def plot_mc_path_convergence(pset_name, label,
 # ═══════════════════════════════════════════════════════════════════════
 
 def _run_param_set(pset_name):
+    """Generate all figures for a single LLH parameter set."""
     label = PARAM_LABELS.get(pset_name, pset_name)
     model = _make_model(pset_name)
 
@@ -940,6 +947,7 @@ def _run_param_set(pset_name):
 
 
 def main():
+    """Entry point: generate all publication-quality plots for selected parameter sets."""
     plt.rcParams.update(STYLE)
     _ensure_output_dir()
 

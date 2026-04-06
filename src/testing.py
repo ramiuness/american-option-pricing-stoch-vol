@@ -10,7 +10,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 import priceModels as pm
-import amOptPricer as aop
+import amerPrice as ap
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -40,7 +40,7 @@ def basis_comparison_grid(params, K, S0_grid, moneyness_labels,
         row = {'S0': S0, 'Moneyness': mlabel}
         for name, btype, border, ridge in configs:
             t0 = time.perf_counter()
-            res_p = aop.price_american_put_lsm_llh(
+            res_p = ap.price_american_put_lsm_llh(
                 model, sim, K, basis_order=border, basis_type=btype,
                 use_cv=False, ridge=ridge)
             row[f'{name}_plain_time'] = time.perf_counter() - t0
@@ -48,7 +48,7 @@ def basis_comparison_grid(params, K, S0_grid, moneyness_labels,
             row[f'{name}_plain_se'] = res_p['std_err']
 
             t0 = time.perf_counter()
-            res_cv = aop.price_american_put_lsm_llh(
+            res_cv = ap.price_american_put_lsm_llh(
                 model, sim, K, basis_order=border, basis_type=btype,
                 use_cv=True, euro_method='llh', ridge=ridge, **llh_params)
             row[f'{name}_cv_time'] = time.perf_counter() - t0
@@ -75,16 +75,16 @@ def basis_sensitivity(params, S0, K, T, n_steps_mc, n_paths, seed,
     model = pm.ImprovedSteinStein(**params, seed=seed)
     sim = model.simulate_prices(S0=S0, T=T, n_steps_mc=n_steps_mc, n_paths=n_paths)
 
-    lag_plain = aop.price_american_put_lsm_llh(model, sim, K, basis_type='laguerre',
+    lag_plain = ap.price_american_put_lsm_llh(model, sim, K, basis_type='laguerre',
         basis_order=3, use_cv=False, ridge=1e-5)
-    lag_cv = aop.price_american_put_lsm_llh(model, sim, K, basis_type='laguerre',
+    lag_cv = ap.price_american_put_lsm_llh(model, sim, K, basis_type='laguerre',
         basis_order=3, use_cv=True, euro_method='llh', ridge=1e-5, **llh_params)
 
     sens_rows = []
     for m in orders:
-        res_p = aop.price_american_put_lsm_llh(model, sim, K, basis_type='gaussian',
+        res_p = ap.price_american_put_lsm_llh(model, sim, K, basis_type='gaussian',
             basis_order=m, use_cv=False, ridge=ridge)
-        res_cv = aop.price_american_put_lsm_llh(model, sim, K, basis_type='gaussian',
+        res_cv = ap.price_american_put_lsm_llh(model, sim, K, basis_type='gaussian',
             basis_order=m, use_cv=True, euro_method='llh', ridge=ridge, **llh_params)
         sens_rows.append({
             'M': m,
@@ -120,7 +120,17 @@ def format_basis_table(df):
 
 
 def plot_basis_comparison(df, moneyness_labels, title_suffix=''):
-    """3-panel figure: Plain prices, CV-LLH prices (vs S0), VR bars."""
+    """Plot 3-panel comparison of Laguerre vs Gaussian RBF regression bases.
+
+    Panels: (1) Plain LSM prices vs S0, (2) CV-LLH prices vs S0,
+    (3) variance reduction ratio bars by moneyness.
+
+    Parameters
+    ----------
+    df               : DataFrame from basis_comparison_grid()
+    moneyness_labels : list of str for bar-chart x-axis
+    title_suffix     : optional string appended to the figure title
+    """
     s0 = df['S0'].values
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
@@ -168,7 +178,19 @@ def plot_basis_comparison(df, moneyness_labels, title_suffix=''):
 
 
 def plot_basis_sensitivity(sens_df, lag_plain_res, lag_cv_res, S0, K):
-    """2-panel figure: price vs M, SE vs M with Laguerre baselines."""
+    """Plot Gaussian RBF sensitivity to number of centers M.
+
+    Two panels: (1) American put price vs M, (2) standard error vs M.
+    Laguerre (order 3) baselines are shown as horizontal dashed lines.
+
+    Parameters
+    ----------
+    sens_df       : DataFrame from basis_sensitivity(), with columns M,
+                    Plain price, Plain SE, CV-LLH price, CV-LLH SE, VR
+    lag_plain_res : dict — Laguerre plain LSM result (baseline)
+    lag_cv_res    : dict — Laguerre CV-LLH result (baseline)
+    S0, K         : float — spot and strike for the figure title
+    """
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
 
     ax1.plot(sens_df['M'], sens_df['Plain price'], 'o-', label='Gaussian Plain')
@@ -287,7 +309,7 @@ def run_multi_basis(params, S0, K, T, n_steps_mc, N_paths, R,
     for r in range(R):
         model = pm.ImprovedSteinStein(**params, seed=base_seed + r)
         sim = model.simulate_prices(S0=S0, T=T, n_steps_mc=n_steps_mc, n_paths=N_paths)
-        res = aop.price_american_put_lsm_llh(
+        res = ap.price_american_put_lsm_llh(
             model, sim, K,
             basis_type=basis_type, basis_order=basis_order, ridge=ridge,
             use_cv=use_cv, euro_method='llh' if use_cv else 'bs',
@@ -358,9 +380,18 @@ def bias_convergence(params, S0, K, T, n_steps_mc, seed,
 
 
 def plot_bias_convergence(bias_df, ref_prices, S0, K):
-    """
-    2-panel figure: (1) price vs N with reference line, (2) bias/SE vs N.
-    Each basis configuration is plotted as a separate series.
+    """Plot bias convergence across MC path counts for each basis configuration.
+
+    Two panels: (1) mean price vs N with high-N reference lines,
+    (2) bias in SE units vs N.  Each (basis, CV) configuration appears as
+    a separate series distinguished by colour and line style.
+
+    Parameters
+    ----------
+    bias_df    : DataFrame from bias_convergence(), with columns Config,
+                 N, Price, SE_multi, Bias (vs ref), Bias / SE
+    ref_prices : dict {config_name: reference_price} at the largest N
+    S0, K      : float — spot and strike for the figure title
     """
     configs = bias_df['Config'].unique()
     # Colors by basis, linestyle by CV status

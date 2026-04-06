@@ -5,8 +5,7 @@ Tests the volatility index alignment fix (Error #1).
 
 import numpy as np
 import priceModels as pm
-import amOptPricer as aop_original
-import amOptPricer_corrected as aop_corrected
+import amerPrice as ap
 
 print("="*80)
 print("FINAL TEST: Original vs Corrected (with Index Fix)")
@@ -21,7 +20,7 @@ model_bs = pm.ImprovedSteinStein(
 S0, K, tau = 100.0, 100.0, 0.25
 
 # Analytical European put
-bs_call = aop_original.price_call_bs(S=S0, K=K, tau=tau, r=0.05, vol=0.2)
+bs_call = ap.price_call_bs(S=S0, K=K, tau=tau, r=0.05, vol=0.2)
 bs_put = bs_call - S0 + K * np.exp(-0.05 * tau)
 
 print(f"\n[1] BS Limit Model Test")
@@ -36,13 +35,13 @@ res_bs = model_bs.simulate_prices(S0=S0, T=tau, n_steps=22, n_paths=n_paths_test
 # Test with BS control variate
 print(f"\n--- With BS Control Variate ---")
 
-am_orig = aop_original.price_american_put_lsm_llh(
+am_orig = ap.price_american_put_lsm_llh(
     model_bs, res_bs, K=K, basis_order=3,
     use_cv=True, improved=True, ridge=1e-5,
     euro_method='bs'
 )
 
-am_corr = aop_corrected.price_american_put_lsm_llh(
+am_corr = ap.price_american_put_lsm_llh(
     model_bs, res_bs, K=K, basis_order=3,
     use_cv=True, improved=True, ridge=1e-5,
     euro_method='bs'
@@ -77,13 +76,13 @@ S0_test = 100.0
 res_llh = model_llh.simulate_prices(S0=S0_test, T=tau_1m, n_steps=22, n_paths=5000)
 
 # Use BS proxy to avoid LLH timing issues
-am_orig_llh = aop_original.price_american_put_lsm_llh(
+am_orig_llh = ap.price_american_put_lsm_llh(
     model_llh, res_llh, K=K_test, basis_order=3,
     use_cv=True, improved=True, ridge=1e-5,
     euro_method='bs'
 )
 
-am_corr_llh = aop_corrected.price_american_put_lsm_llh(
+am_corr_llh = ap.price_american_put_lsm_llh(
     model_llh, res_llh, K=K_test, basis_order=3,
     use_cv=True, improved=True, ridge=1e-5,
     euro_method='bs'
