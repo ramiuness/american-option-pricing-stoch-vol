@@ -9,6 +9,7 @@ Usage (from project root):
 
 import sys
 import os
+import gc
 import numpy as np
 
 import matplotlib
@@ -123,7 +124,7 @@ def _moneyness_label_fixed(S0, K, option_type='call'):
 def plot_mc_convergence(model, label, pset_name,
                         S0_values=(70.0, 95.0, 110.0),
                         K=100.0, tau=TAU, n_steps_mc=52,
-                        n_paths_values=(200, 500, 1000, 5000, 10000, 50000),
+                        n_paths_values=(200, 500, 1000, 5000, 10000),
                         n_seeds=10, base_seed=100,
                         phi_max=300.0, n_phi=513, n_steps_ode=128):
     """Plot MC call price convergence to the LLH formula across path counts."""
@@ -190,7 +191,7 @@ def plot_mc_convergence(model, label, pset_name,
 def _compute_mc_llh_grid(model,
                          S0_values=(90.0, 95.0, 100.0, 105.0, 110.0),
                          K_values=(80.0, 100.0, 120.0),
-                         tau=TAU, n_steps_mc=52, n_paths=50_000,
+                         tau=TAU, n_steps_mc=52, n_paths=10_000,
                          phi_max=300.0, n_phi=513, n_steps_ode=128):
     """Compute LLH formula and MC call prices over an (S0, K) grid."""
     pre = model.llh_precompute_tau(tau, phi_max, n_phi, n_steps_ode)
@@ -438,16 +439,26 @@ HORIZON_CONFIGS = {
 AM_K = 100.0
 AM_S0_GRID = (85.0, 90.0, 100.0, 110.0, 115.0)
 AM_MONEYNESS = ('Deep ITM', 'ITM', 'ATM', 'OTM', 'Deep OTM')
-AM_N_PATHS = 50_000
-AM_LLH_PARAMS = dict(phi_max=300.0, n_phi=513, n_steps_rk4=128)
+AM_N_PATHS = 10_000
+AM_LLH_PARAMS = dict(phi_max=300.0, n_phi=513, n_steps_rk4=256)
+
+def _llh_ode_kw():
+    """Map amerPrice key names to priceModels key names for ODE params."""
+    return dict(phi_max=AM_LLH_PARAMS['phi_max'],
+                n_phi=AM_LLH_PARAMS['n_phi'],
+                n_steps_ode=AM_LLH_PARAMS['n_steps_rk4'])
+
+# Basis configs: (basis_type, basis_order, ridge, label)
+BASIS_LAGUERRE = ('laguerre', None, 1e-5, 'Laguerre')
+BASIS_GAUSSIAN = ('gaussian', 10, 1e-4, 'Gaussian')
 
 
-def _compute_american_grid(pset_name, seed=42):
+def _compute_american_grid(pset_name, basis_type='laguerre', basis_order=None,
+                           ridge=1e-5, seed=42):
     """
     Compute American put prices across moneyness and horizons for one param set.
 
-    Returns dict {horizon_key: list of row dicts} with keys matching
-    the DataFrame columns produced by reporting.american_put_comparison.
+    Returns dict {horizon_key: list of row dicts}.
     """
     results = {}
     for hkey, hcfg in HORIZON_CONFIGS.items():
@@ -459,27 +470,24 @@ def _compute_american_grid(pset_name, seed=42):
                                         n_paths=AM_N_PATHS)
 
             mc_put = pm.price_put_mc(sim['S'], K=AM_K, T=T, r=model.r)
+            pre = ap.precompute_european(model, sim, AM_K, **AM_LLH_PARAMS)
             res_plain = ap.price_american_put_lsm_llh(
-                model, sim, AM_K, use_cv=False)
-            res_bs = ap.price_american_put_lsm_llh(
-                model, sim, AM_K, use_cv=True, euro_method='bs')
+                model, sim, AM_K, use_cv=False, ridge=ridge,
+                basis_type=basis_type, basis_order=basis_order,
+                precomputed=pre)
             res_llh = ap.price_american_put_lsm_llh(
                 model, sim, AM_K, use_cv=True, euro_method='llh',
-                **AM_LLH_PARAMS)
+                ridge=ridge, basis_type=basis_type, basis_order=basis_order,
+                precomputed=pre)
 
             rows.append({
                 'Moneyness': mlabel, 'S0': S0,
                 'MC_put_price': mc_put['price'], 'MC_put_se': mc_put['std_err'],
                 'Plain_price': res_plain['price'],
                 'Plain_se': res_plain['std_err'],
-                'BS_price': res_bs.get('price_imp', res_bs['price']),
-                'BS_se': res_bs.get('std_err_imp', res_bs['std_err']),
-                'BS_VR': (res_plain['std_err'] / res_bs.get('std_err_imp', res_bs['std_err']))**2
-                         if res_bs.get('std_err_imp', res_bs['std_err']) > 0 else np.nan,
                 'LLH_price': res_llh.get('price_imp', res_llh['price']),
                 'LLH_se': res_llh.get('std_err_imp', res_llh['std_err']),
-                'LLH_VR': (res_plain['std_err'] / res_llh.get('std_err_imp', res_llh['std_err']))**2
-                          if res_llh.get('std_err_imp', res_llh['std_err']) > 0 else np.nan,
+                'LLH_VR': res_llh.get('vr', np.nan),
             })
         results[hkey] = rows
     return results
@@ -488,11 +496,10 @@ def _compute_american_grid(pset_name, seed=42):
 def plot_american_put_panels(pset_name, label, horizon_key,
                              S0_values=(85.0, 90.0, 100.0, 110.0, 115.0),
                              K_values=(80.0, 120.0),
-                             n_paths=10_000, seed=42,
-                             phi_max=300.0, n_phi=513, n_steps_rk4=128):
+                             n_paths=10_000, seed=42):
     """
     Two-panel figure: American put prices across S0 for K=80 and K=120.
-    Each panel has 4 lines: MC Put (dashed), Plain LSM, CV-BS, CV-LLH with SE error bars.
+    Each panel has 3 lines: MC Put (dashed), Plain LSM, CV-LLH with SE error bars.
     One figure per (param_set, maturity).
     """
     hcfg = HORIZON_CONFIGS[horizon_key]
@@ -505,22 +512,18 @@ def plot_american_put_panels(pset_name, label, horizon_key,
         for K in K_values:
             mc_put = pm.price_put_mc(sim['S'], K=K, T=T, r=model.r)['price']
 
+            pre = ap.precompute_european(model, sim, K, **AM_LLH_PARAMS)
             res_plain = ap.price_american_put_lsm_llh(
-                model, sim, K, use_cv=False)
-
-            res_bs = ap.price_american_put_lsm_llh(
-                model, sim, K, use_cv=True, euro_method='bs')
+                model, sim, K, use_cv=False, precomputed=pre)
 
             res_llh = ap.price_american_put_lsm_llh(
                 model, sim, K, use_cv=True, euro_method='llh',
-                phi_max=phi_max, n_phi=n_phi, n_steps_rk4=n_steps_rk4)
+                precomputed=pre)
 
             data[(S0, K)] = {
                 'mc_put': mc_put,
                 'lsm_price': res_plain['price'],
                 'lsm_se': res_plain['std_err'],
-                'bs_price': res_bs.get('price_imp', res_bs['price']),
-                'bs_se': res_bs.get('std_err_imp', res_bs['std_err']),
                 'llh_price': res_llh.get('price_imp', res_llh['price']),
                 'llh_se': res_llh.get('std_err_imp', res_llh['std_err']),
             }
@@ -534,16 +537,12 @@ def plot_american_put_panels(pset_name, label, horizon_key,
         mc = [data[(S0, K)]['mc_put'] for S0 in S0_values]
         lsm = [data[(S0, K)]['lsm_price'] for S0 in S0_values]
         lsm_se = [1.96 * data[(S0, K)]['lsm_se'] for S0 in S0_values]
-        bs = [data[(S0, K)]['bs_price'] for S0 in S0_values]
-        bs_se = [1.96 * data[(S0, K)]['bs_se'] for S0 in S0_values]
         llh = [data[(S0, K)]['llh_price'] for S0 in S0_values]
         llh_se = [1.96 * data[(S0, K)]['llh_se'] for S0 in S0_values]
 
         ax.plot(S0_values, mc, 's--', color='#2ca02c', label='Euro Put (MC)')
         ax.errorbar(S0_values, lsm, yerr=lsm_se,
                     fmt='o-', color='#1f77b4', capsize=4, label='Plain LSM')
-        ax.errorbar(S0_values, bs, yerr=bs_se,
-                    fmt='D-', color='#ff7f0e', capsize=4, label='LSM + CV-BS')
         ax.errorbar(S0_values, llh, yerr=llh_se,
                     fmt='^-', color='#d62728', capsize=4, label='LSM + CV-LLH')
 
@@ -555,7 +554,7 @@ def plot_american_put_panels(pset_name, label, horizon_key,
             ax.set_ylabel('Put price')
 
     fig.suptitle(
-        f'American put prices: MC Put vs LSM vs CV-BS vs CV-LLH\n'
+        f'American put prices: MC Put vs LSM vs CV-LLH\n'
         f'{label} params, {hcfg["label"]} horizon',
         fontsize=13, y=1.03)
     fig.tight_layout()
@@ -564,13 +563,314 @@ def plot_american_put_panels(pset_name, label, horizon_key,
     print(f"  Saved {fname}")
 
 
+def plot_american_put_panels_floors(pset_name, label, horizon_key,
+                                    S0_values=(85.0, 90.0, 100.0, 110.0, 115.0),
+                                    K_values=(80.0, 120.0),
+                                    n_paths=10_000, seed=42):
+    """
+    Two-panel figure comparing exercise floor methods across moneyness.
+    6 curves: Euro Put (MC), LSM (no floor), LSM (MC floor), LSM (BS floor),
+    LSM (LLH floor), LSM + CV-LLH.
+    """
+    hcfg = HORIZON_CONFIGS[horizon_key]
+    T, n_steps_mc = hcfg['T'], hcfg['n_steps_mc']
+
+    data = {}
+    for S0 in S0_values:
+        model = _make_model(pset_name, seed=seed)
+        sim = model.simulate_prices(S0=S0, T=T, n_steps_mc=n_steps_mc, n_paths=n_paths)
+        for K in K_values:
+            mc_put = pm.price_put_mc(sim['S'], K=K, T=T, r=model.r)['price']
+
+            pre = ap.precompute_european(model, sim, K, **AM_LLH_PARAMS)
+            res_no_floor = ap.price_american_put_lsm_llh(
+                model, sim, K, use_cv=False, floor_method='none')
+            res_mc1_floor = ap.price_american_put_lsm_llh(
+                model, sim, K, use_cv=False, floor_method='mc1')
+            res_bs_floor = ap.price_american_put_lsm_llh(
+                model, sim, K, use_cv=False, floor_method='bs')
+            res_llh_floor = ap.price_american_put_lsm_llh(
+                model, sim, K, use_cv=False, precomputed=pre)
+            res_cv_llh = ap.price_american_put_lsm_llh(
+                model, sim, K, use_cv=True, euro_method='llh',
+                precomputed=pre)
+
+            data[(S0, K)] = {
+                'mc_put': mc_put,
+                'no_floor_price': res_no_floor['price'],
+                'no_floor_se': res_no_floor['std_err'],
+                'mc1_floor_price': res_mc1_floor['price'],
+                'mc1_floor_se': res_mc1_floor['std_err'],
+                'bs_floor_price': res_bs_floor['price'],
+                'bs_floor_se': res_bs_floor['std_err'],
+                'llh_floor_price': res_llh_floor['price'],
+                'llh_floor_se': res_llh_floor['std_err'],
+                'cv_llh_price': res_cv_llh.get('price_imp', res_cv_llh['price']),
+                'cv_llh_se': res_cv_llh.get('std_err_imp', res_cv_llh['std_err']),
+            }
+
+    n_panels = len(K_values)
+    fig, axes = plt.subplots(1, n_panels, figsize=(14, 5), sharey=False)
+    if n_panels == 1:
+        axes = [axes]
+
+    curves = [
+        ('mc_put',        None,           's--', '#2ca02c', 'Euro Put (MC)'),
+        ('no_floor_price','no_floor_se',  'x-',  '#8c564b', 'LSM (no floor)'),
+        ('mc1_floor_price','mc1_floor_se','p-',  '#9467bd', 'LSM (MC floor)'),
+        ('bs_floor_price','bs_floor_se',  'D-',  '#ff7f0e', 'LSM (BS floor)'),
+        ('llh_floor_price','llh_floor_se','o-',  '#1f77b4', 'LSM (LLH floor)'),
+        ('cv_llh_price',  'cv_llh_se',    '^-',  '#d62728', 'LSM + CV-LLH'),
+    ]
+
+    for i, (ax, K) in enumerate(zip(axes, K_values)):
+        s0 = list(S0_values)
+        for pkey, sekey, fmt, color, clabel in curves:
+            vals = [data[(S0, K)][pkey] for S0 in s0]
+            if sekey is None:
+                ax.plot(s0, vals, fmt, color=color, label=clabel)
+            else:
+                se = [1.96 * data[(S0, K)][sekey] for S0 in s0]
+                ax.errorbar(s0, vals, yerr=se, fmt=fmt, color=color,
+                            capsize=4, label=clabel)
+
+        ax.set_xlabel('$S_0$')
+        ax.set_title(_k_panel_label(K, S0_values, option_type='put'))
+        ax.legend(fontsize=7)
+
+        if i == 0:
+            ax.set_ylabel('Put price')
+
+    fig.suptitle(
+        f'American put prices: exercise floor comparison\n'
+        f'{label} params, {hcfg["label"]} horizon',
+        fontsize=13, y=1.03)
+    fig.tight_layout()
+    fname = f'fig5_american_put_{pset_name}_{horizon_key}_floors.png'
+    _savefig(fig, fname)
+    print(f"  Saved {fname}")
+
+
+def plot_estimator_scatter(pset_name, label, S0=100.0, K=100.0,
+                           T=1.0, n_steps_mc=52, n_paths=10_000, seed=42):
+    """
+    Cost-precision scatter for all 6 estimators at a single (S0, K, T).
+    Each point: (wall time, SE) on log-log axes.
+    """
+    import time as _time
+
+    model = _make_model(pset_name, seed=seed)
+    sim = model.simulate_prices(S0=S0, T=T, n_steps_mc=n_steps_mc, n_paths=n_paths)
+
+    estimators = [
+        ('LSM (no floor)',  'x',  '#8c564b'),
+        ('LSM (MC floor)',  'p',  '#9467bd'),
+        ('LSM (BS floor)',  'D',  '#ff7f0e'),
+        ('LSM (LLH floor)', 'o', '#1f77b4'),
+        ('LSM + CV-LLH',   '^',  '#d62728'),
+    ]
+
+    results = {}
+
+    # Precompute once (shared by LLH floor and CV-LLH)
+    t0 = _time.perf_counter()
+    pre = ap.precompute_european(model, sim, K, **AM_LLH_PARAMS)
+    t_precomp = _time.perf_counter() - t0
+
+    # No floor
+    t0 = _time.perf_counter()
+    r = ap.price_american_put_lsm_llh(model, sim, K, use_cv=False, floor_method='none')
+    results['LSM (no floor)'] = (_time.perf_counter() - t0, r['std_err'])
+
+    # MC floor
+    t0 = _time.perf_counter()
+    r = ap.price_american_put_lsm_llh(model, sim, K, use_cv=False, floor_method='mc1')
+    results['LSM (MC floor)'] = (_time.perf_counter() - t0, r['std_err'])
+
+    # BS floor
+    t0 = _time.perf_counter()
+    r = ap.price_american_put_lsm_llh(model, sim, K, use_cv=False, floor_method='bs')
+    results['LSM (BS floor)'] = (_time.perf_counter() - t0, r['std_err'])
+
+    # LLH floor (precompute cost included)
+    t0 = _time.perf_counter()
+    r = ap.price_american_put_lsm_llh(model, sim, K, use_cv=False, precomputed=pre)
+    results['LSM (LLH floor)'] = (t_precomp + _time.perf_counter() - t0, r['std_err'])
+
+    # CV-LLH (precompute cost included)
+    t0 = _time.perf_counter()
+    r = ap.price_american_put_lsm_llh(model, sim, K, use_cv=True, euro_method='llh',
+                                       precomputed=pre)
+    results['LSM + CV-LLH'] = (t_precomp + _time.perf_counter() - t0,
+                                r.get('std_err_imp', r['std_err']))
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+
+    annotate_labels = {'LSM (no floor)', 'LSM + CV-LLH'}
+    for elabel, marker, color in estimators:
+        t, se = results[elabel]
+        ax.scatter(t, se, s=60, marker=marker, color=color, zorder=5, label=elabel)
+        if elabel in annotate_labels:
+            ax.annotate(f"SE={se:.4f}\n{t:.2f}s",
+                        xy=(t, se), xytext=(15, 8), textcoords='offset points',
+                        fontsize=8, color=color,
+                        arrowprops=dict(arrowstyle='->', color=color, lw=0.8))
+        print(f"  {elabel}: {t:.3f}s, SE={se:.6f}")
+
+    ax.set_xscale('log')
+    ax.set_yscale('log')
+    ax.set_xlabel('Wall time (s)')
+    ax.set_ylabel('Standard error')
+    ax.legend(fontsize=8, loc='lower left', markerscale=0.8)
+
+    fig.suptitle(
+        f'Cost--precision tradeoff ($N={n_paths:,}$, $S_0={S0:.0f}$, '
+        f'$K={K:.0f}$, $T={T}$)\n{label} params',
+        fontsize=13, y=1.03)
+    fig.tight_layout()
+    fname = f'fig_estimator_scatter_{pset_name}.png'
+    _savefig(fig, fname)
+    plt.close(fig)
+    print(f"  Saved {fname}")
+
+
+def plot_mc1_floor_convergence(pset_name, label,
+                               S0_cases=((95.0, 100.0, 'ITM'), (100.0, 95.0, 'OTM')),
+                               T=1.0, n_steps_mc=52,
+                               N_values=(5_000, 10_000, 20_000, 50_000),
+                               base_seed=100):
+    """
+    Price convergence with N: Plain LSM (LLH floor) vs Plain LSM (MC1 floor).
+    Two panels (ITM, OTM) with Euro Put (LLH) baseline.
+    """
+    # European LLH put baseline per S0_case
+    euro_put = {}
+    for S0, K_case, s0_label in S0_cases:
+        model = _make_model(pset_name, seed=base_seed)
+        pre = model.llh_precompute_tau(T, **_llh_ode_kw())
+        euro_put[s0_label] = model.price_put_llh(
+            S=S0, K=K_case, tau=T, vol=model.sigma0, theta=model.theta0,
+            pre=pre, **_llh_ode_kw()).item()
+
+    data = {s0_label: [] for _, _, s0_label in S0_cases}
+    for S0, K_case, s0_label in S0_cases:
+        for n in N_values:
+            model = _make_model(pset_name, seed=base_seed)
+            sim = model.simulate_prices(S0=S0, T=T, n_steps_mc=n_steps_mc, n_paths=n)
+            pre = ap.precompute_european(model, sim, K_case, **AM_LLH_PARAMS)
+            res_llh_floor = ap.price_american_put_lsm_llh(
+                model, sim, K_case, use_cv=False, precomputed=pre)
+            res_mc1_floor = ap.price_american_put_lsm_llh(
+                model, sim, K_case, use_cv=False, floor_method='mc1')
+            data[s0_label].append({
+                'N': n,
+                'llh_floor_price': res_llh_floor['price'],
+                'llh_floor_se': res_llh_floor['std_err'],
+                'mc1_floor_price': res_mc1_floor['price'],
+                'mc1_floor_se': res_mc1_floor['std_err'],
+            })
+            print(f"    {s0_label} N={n:>7}: LLH={res_llh_floor['price']:.4f} "
+                  f"MC1={res_mc1_floor['price']:.4f}")
+            del sim, pre, res_llh_floor, res_mc1_floor
+        gc.collect()
+
+    tick_labels = [f'{n // 1000}k' for n in N_values]
+
+    fig, axes = plt.subplots(1, len(S0_cases), figsize=(14, 5), sharey=False)
+    if len(S0_cases) == 1:
+        axes = [axes]
+
+    for ax, (S0, K_case, s0_label) in zip(axes, S0_cases):
+        rows = data[s0_label]
+        ns = [r['N'] for r in rows]
+        ep = euro_put[s0_label]
+        ax.axhline(ep, color='#2ca02c', ls='--', lw=1.5,
+                   label=f'Euro Put (LLH) = {ep:.2f}')
+        ax.errorbar(ns, [r['llh_floor_price'] for r in rows],
+                    yerr=[1.96 * r['llh_floor_se'] for r in rows],
+                    fmt='o-', color='#1f77b4', capsize=4, label='LSM (LLH floor)')
+        ax.errorbar(ns, [r['mc1_floor_price'] for r in rows],
+                    yerr=[1.96 * r['mc1_floor_se'] for r in rows],
+                    fmt='p-', color='#9467bd', capsize=4, label='LSM (MC floor)')
+        ax.set_xscale('log')
+        ax.set_xticks(N_values)
+        ax.set_xticklabels(tick_labels)
+        ax.set_xlabel('$N$ (paths)')
+        ax.set_title(f'$S_0={S0:.0f}$, $K={K_case:.0f}$ ({s0_label})')
+        ax.legend(fontsize=9)
+
+    axes[0].set_ylabel('American put price')
+    fig.suptitle(
+        f'Price convergence: LLH floor vs MC floor\n'
+        f'{label} params, 1-year horizon',
+        fontsize=13, y=1.03)
+    fig.tight_layout()
+    fname = f'fig10_price_convergence_{pset_name}_mc1floor.png'
+    _savefig(fig, fname)
+    plt.close(fig)
+    print(f"  Saved {fname}")
+
+
+def plot_vr_mc1_comparison(pset_name, label, seed=42):
+    """
+    1×2 figure (1-month, 1-year): theoretical VR of CV-LLH vs CV-MC1 across S0.
+    VR = 1/(1 - rho^2) from pricer output.
+    """
+    results = {}
+    for hkey, hcfg in HORIZON_CONFIGS.items():
+        T, n_steps_mc = hcfg['T'], hcfg['n_steps_mc']
+        rows = []
+        for S0 in AM_S0_GRID:
+            model = _make_model(pset_name, seed=seed)
+            sim = model.simulate_prices(S0=S0, T=T, n_steps_mc=n_steps_mc,
+                                        n_paths=AM_N_PATHS)
+            pre = ap.precompute_european(model, sim, AM_K, **AM_LLH_PARAMS)
+            res_cv_llh = ap.price_american_put_lsm_llh(
+                model, sim, AM_K, use_cv=True, euro_method='llh',
+                precomputed=pre)
+            res_cv_mc1 = ap.price_american_put_lsm_llh(
+                model, sim, AM_K, use_cv=True, euro_method='mc1')
+            rows.append({
+                'S0': S0,
+                'vr_llh': res_cv_llh.get('vr', np.nan),
+                'vr_mc1': res_cv_mc1.get('vr', np.nan),
+            })
+            del sim, pre, res_cv_llh, res_cv_mc1
+        gc.collect()
+        results[hkey] = rows
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharey=True)
+
+    for ax, (hkey, rows) in zip(axes, results.items()):
+        hlbl = HORIZON_CONFIGS[hkey]['label']
+        s0 = [r['S0'] for r in rows]
+        ax.plot(s0, [r['vr_llh'] for r in rows],
+                '^-', color='#d62728', label='CV-LLH')
+        ax.plot(s0, [r['vr_mc1'] for r in rows],
+                'p-', color='#9467bd', label='CV-MC1')
+        ax.axhline(1, color='gray', ls='--', lw=0.8, alpha=0.6)
+        ax.set_xlabel('$S_0$')
+        ax.set_title(f'{hlbl} horizon')
+        ax.legend(fontsize=9)
+
+    axes[0].set_ylabel('VR = $1/(1 - \\rho^2)$')
+    fig.suptitle(
+        f'Variance reduction: CV-LLH vs CV-MC1 ($K = {AM_K:.0f}$)\n{label} params',
+        fontsize=13, y=1.03)
+    fig.tight_layout()
+    fname = f'fig7_vr_mc1_{pset_name}.png'
+    _savefig(fig, fname)
+    plt.close(fig)
+    print(f"  Saved {fname}")
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # Plot 6: American Put Prices vs Spot (K=100, both horizons)
 # ═══════════════════════════════════════════════════════════════════════
 
-def plot_american_prices_vs_spot(pset_name, label, am_grid):
+def plot_american_prices_vs_spot(pset_name, label, am_grid, basis_label=''):
     """
-    1×2 figure (1-month, 1-year): MC Put, Plain LSM, CV-BS, CV-LLH vs S0 at K=100.
+    1×2 figure (1-month, 1-year): MC Put, Plain LSM, CV-LLH vs S0 at K=100.
     """
     fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharey=False)
 
@@ -582,9 +882,6 @@ def plot_american_prices_vs_spot(pset_name, label, am_grid):
         ax.errorbar(s0, [r['Plain_price'] for r in rows],
                     yerr=[1.96 * r['Plain_se'] for r in rows],
                     fmt='o-', color='#1f77b4', capsize=4, label='Plain LSM')
-        ax.errorbar(s0, [r['BS_price'] for r in rows],
-                    yerr=[1.96 * r['BS_se'] for r in rows],
-                    fmt='D-', color='#ff7f0e', capsize=4, label='LSM + CV-BS')
         ax.errorbar(s0, [r['LLH_price'] for r in rows],
                     yerr=[1.96 * r['LLH_se'] for r in rows],
                     fmt='^-', color='#d62728', capsize=4, label='LSM + CV-LLH')
@@ -593,11 +890,13 @@ def plot_american_prices_vs_spot(pset_name, label, am_grid):
         ax.legend(fontsize=9)
 
     axes[0].set_ylabel('Put price')
+    basis_suffix = f', {basis_label} basis' if basis_label else ''
     fig.suptitle(
-        f'American put prices vs spot ($K = {AM_K:.0f}$)\n{label} params',
+        f'American put prices vs spot ($K = {AM_K:.0f}$)\n{label} params{basis_suffix}',
         fontsize=13, y=1.03)
     fig.tight_layout()
-    fname = f'fig6_american_prices_{pset_name}.png'
+    btag = f'_{basis_label.lower()}' if basis_label else ''
+    fname = f'fig6_american_prices_{pset_name}{btag}.png'
     _savefig(fig, fname)
     print(f"  Saved {fname}")
 
@@ -608,33 +907,23 @@ def plot_american_prices_vs_spot(pset_name, label, am_grid):
 
 def plot_vr_ratios(pset_name, label, am_grid):
     """
-    1×2 figure by horizon: grouped bars comparing CV-BS and CV-LLH VR
-    across moneyness levels within each panel.
+    1×2 figure by horizon: CV-LLH variance reduction ratio vs S0.
     """
     fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharey=True)
-    x = np.arange(len(AM_MONEYNESS))
-    bar_w = 0.35
-    horizon_keys = list(am_grid.keys())
-    cv_colors = ['#ff7f0e', '#d62728']
-    cv_labels = ['CV-BS', 'CV-LLH']
-    vr_cols = ['BS_VR', 'LLH_VR']
 
-    for ax, hkey in zip(axes, horizon_keys):
+    for ax, (hkey, rows) in zip(axes, am_grid.items()):
         hlbl = HORIZON_CONFIGS[hkey]['label']
-        rows = am_grid[hkey]
-        for k, (vr_col, cvlbl, color) in enumerate(zip(vr_cols, cv_labels, cv_colors)):
-            vals = [r[vr_col] for r in rows]
-            ax.bar(x + (k - 0.5) * bar_w, vals, bar_w,
-                   label=cvlbl, color=color, alpha=0.85)
-        ax.set_xticks(x)
-        ax.set_xticklabels(AM_MONEYNESS, rotation=30, ha='right', fontsize=9)
-        ax.set_title(f'{hlbl} horizon')
+        s0 = [r['S0'] for r in rows]
+        vr = [r['LLH_VR'] for r in rows]
+        ax.plot(s0, vr, 'o-', color='#d62728', label='CV-LLH')
         ax.axhline(1, color='gray', ls='--', lw=0.8, alpha=0.6)
+        ax.set_xlabel('$S_0$')
+        ax.set_title(f'{hlbl} horizon')
         ax.legend(fontsize=9)
 
     axes[0].set_ylabel('VR Ratio')
     fig.suptitle(
-        f'Variance reduction ratios ($K = {AM_K:.0f}$)\n{label} params',
+        f'Variance reduction ratio ($K = {AM_K:.0f}$)\n{label} params',
         fontsize=13, y=1.03)
     fig.tight_layout()
     fname = f'fig7_vr_ratios_{pset_name}.png'
@@ -648,24 +937,17 @@ def plot_vr_ratios(pset_name, label, am_grid):
 
 def plot_price_shift(pset_name, label, am_grid):
     """
-    1×2 figure by horizon: line plot showing |CV_price - Plain_price| / Plain_price
-    (relative price difference, %) for CV-BS and CV-LLH across moneyness.
+    1×2 figure by horizon: |CV-LLH price - Plain price| / Plain price (%) vs S0.
     """
     fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharey=True)
-    x = np.arange(len(AM_MONEYNESS))
-    horizon_keys = list(am_grid.keys())
-    cv_styles = [('BS_price', 'CV-BS', '#ff7f0e', 'D-'),
-                 ('LLH_price', 'CV-LLH', '#d62728', '^-')]
 
-    for ax, hkey in zip(axes, horizon_keys):
+    for ax, (hkey, rows) in zip(axes, am_grid.items()):
         hlbl = HORIZON_CONFIGS[hkey]['label']
-        rows = am_grid[hkey]
-        for pk, cvlbl, color, fmt in cv_styles:
-            vals = [100 * abs(r[pk] - r['Plain_price']) / r['Plain_price']
-                    if r['Plain_price'] > 0 else np.nan for r in rows]
-            ax.plot(x, vals, fmt, color=color, label=cvlbl)
-        ax.set_xticks(x)
-        ax.set_xticklabels(AM_MONEYNESS, rotation=30, ha='right', fontsize=9)
+        s0 = [r['S0'] for r in rows]
+        vals = [100 * abs(r['LLH_price'] - r['Plain_price']) / r['Plain_price']
+                if r['Plain_price'] > 0 else np.nan for r in rows]
+        ax.plot(s0, vals, '^-', color='#d62728', label='CV-LLH')
+        ax.set_xlabel('$S_0$')
         ax.set_title(f'{hlbl} horizon')
         ax.legend(fontsize=9)
 
@@ -683,32 +965,24 @@ def plot_price_shift(pset_name, label, am_grid):
 # Plot 8: Early Exercise Premium
 # ═══════════════════════════════════════════════════════════════════════
 
-def plot_eep_bars(pset_name, label, am_grid):
+def plot_eep(pset_name, label, am_grid):
     """
-    1×2 figure (1-month, 1-year): grouped bars of EEP (%) by method across moneyness.
+    1×2 figure (1-month, 1-year): EEP (%) vs S0 for Plain LSM and CV-LLH.
     """
     fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharey=True)
-    x = np.arange(len(AM_MONEYNESS))
-    bar_w = 0.25
-    methods = [('Plain_price', 'Plain LSM', '#1f77b4'),
-               ('BS_price',    'CV-BS',     '#ff7f0e'),
-               ('LLH_price',   'CV-LLH',    '#d62728')]
 
     for ax, (hkey, rows) in zip(axes, am_grid.items()):
         hlbl = HORIZON_CONFIGS[hkey]['label']
-        for k, (price_key, mlabel, color) in enumerate(methods):
-            eep_pct = []
-            for r in rows:
-                mc = r['MC_put_price']
-                am = r[price_key]
-                eep_pct.append((am - mc) / mc * 100 if mc > 0.01 else np.nan)
-            offset = (k - 1) * bar_w
-            ax.bar(x + offset, eep_pct, bar_w, label=mlabel, color=color, alpha=0.85)
-
-        ax.set_xticks(x)
-        ax.set_xticklabels(AM_MONEYNESS, rotation=30, ha='right', fontsize=9)
-        ax.set_title(f'{hlbl} horizon')
+        s0 = [r['S0'] for r in rows]
+        eep_plain = [(r['Plain_price'] - r['MC_put_price']) / r['MC_put_price'] * 100
+                     if r['MC_put_price'] > 0.01 else np.nan for r in rows]
+        eep_llh = [(r['LLH_price'] - r['MC_put_price']) / r['MC_put_price'] * 100
+                   if r['MC_put_price'] > 0.01 else np.nan for r in rows]
+        ax.plot(s0, eep_plain, 'o-', color='#1f77b4', label='Plain LSM')
+        ax.plot(s0, eep_llh, '^-', color='#d62728', label='CV-LLH')
         ax.axhline(0, color='gray', ls='--', lw=0.8, alpha=0.6)
+        ax.set_xlabel('$S_0$')
+        ax.set_title(f'{hlbl} horizon')
         ax.legend(fontsize=9)
 
     axes[0].set_ylabel('EEP (%)')
@@ -742,7 +1016,7 @@ def plot_american_bs_limit(n_paths=10_000, seed=42):
         sim = model.simulate_prices(S0=S0, T=T, n_steps_mc=n_steps_mc, n_paths=n_paths)
         mc_put = pm.price_put_mc(sim['S'], K=AM_K, T=T, r=model.r)
         res_plain = ap.price_american_put_lsm_llh(model, sim, AM_K,
-                                                    use_cv=False)
+                                                    use_cv=False, floor_method='bs')
         res_bs = ap.price_american_put_lsm_llh(model, sim, AM_K,
                                                   use_cv=True, euro_method='bs')
         s0_list.append(S0)
@@ -765,14 +1039,10 @@ def plot_american_bs_limit(n_paths=10_000, seed=42):
     ax1.set_title('American put prices')
     ax1.legend(fontsize=9)
 
-    # Right panel: VR bar chart
+    # Right panel: VR line chart
     vr = [(lse / bse)**2 if bse > 0 else np.nan
           for lse, bse in zip(lsm_se_list, bs_se_list)]
-    x = np.arange(len(s0_list))
-    labels = [f'{s:.0f}' for s in s0_list]
-    ax2.bar(x, vr, color='#d62728', alpha=0.85)
-    ax2.set_xticks(x)
-    ax2.set_xticklabels(labels)
+    ax2.plot(s0_list, vr, 'o-', color='#d62728')
     ax2.set_xlabel('$S_0$')
     ax2.set_ylabel('VR Ratio')
     ax2.set_title('Variance reduction (CV-BS)')
@@ -792,37 +1062,49 @@ def plot_american_bs_limit(n_paths=10_000, seed=42):
 # ═══════════════════════════════════════════════════════════════════════
 
 def plot_mc_path_convergence(pset_name, label,
-                             S0_cases=((90.0, 100.0, 'ITM'), (100.0, 80.0, 'OTM')),
+                             S0_cases=((95.0, 100.0, 'ITM'), (100.0, 95.0, 'OTM')),
                              T=1.0, n_steps_mc=52,
-                             N_values=(1_000, 5_000, 10_000, 25_000, 50_000),
+                             N_values=(5_000, 10_000, 20_000, 50_000),
                              base_seed=100):
     """
     Two figures (price convergence + EEP convergence) showing the effect of
-    increasing MC paths on Plain LSM and CV-BS estimators.
+    increasing MC paths on Plain LSM and CV-LLH estimators.
 
     S0_cases: tuple of (S0, K, label) triples — each panel uses its own strike.
     """
-    # Collect data
+    # European LLH put baseline per S0_case
+    euro_put = {}
+    for S0, K_case, s0_label in S0_cases:
+        model = _make_model(pset_name, seed=base_seed)
+        pre = model.llh_precompute_tau(T, **_llh_ode_kw())
+        euro_put[s0_label] = model.price_put_llh(
+            S=S0, K=K_case, tau=T, vol=model.sigma0, theta=model.theta0,
+            pre=pre, **_llh_ode_kw()).item()
+
     data = {s0_label: [] for _, _, s0_label in S0_cases}
     for S0, K_case, s0_label in S0_cases:
         for n in N_values:
             model = _make_model(pset_name, seed=base_seed)
             sim = model.simulate_prices(S0=S0, T=T, n_steps_mc=n_steps_mc, n_paths=n)
             mc_put = pm.price_put_mc(sim['S'], K=K_case, T=T, r=model.r)['price']
+            pre = ap.precompute_european(model, sim, K_case, **AM_LLH_PARAMS)
             res_plain = ap.price_american_put_lsm_llh(
-                model, sim, K_case, use_cv=False)
-            res_bs = ap.price_american_put_lsm_llh(
-                model, sim, K_case, use_cv=True, euro_method='bs')
+                model, sim, K_case, use_cv=False, precomputed=pre)
+            res_llh = ap.price_american_put_lsm_llh(
+                model, sim, K_case, use_cv=True, euro_method='llh',
+                precomputed=pre)
             data[s0_label].append({
                 'N': n,
                 'mc_put': mc_put,
                 'plain_price': res_plain['price'],
                 'plain_se': res_plain['std_err'],
-                'bs_price': res_bs.get('price_imp', res_bs['price']),
-                'bs_se': res_bs.get('std_err_imp', res_bs['std_err']),
+                'llh_price': res_llh.get('price_imp', res_llh['price']),
+                'llh_se': res_llh.get('std_err_imp', res_llh['std_err']),
             })
             print(f"    {s0_label} N={n:>7}: Plain={res_plain['price']:.4f} "
-                  f"CV-BS={res_bs.get('price_imp', res_bs['price']):.4f}")
+                  f"CV-LLH={res_llh.get('price_imp', res_llh['price']):.4f}")
+            del sim, pre, res_plain, res_llh
+        gc.collect()
 
     tick_labels = [f'{n // 1000}k' for n in N_values]
 
@@ -834,12 +1116,15 @@ def plot_mc_path_convergence(pset_name, label,
     for ax, (S0, K_case, s0_label) in zip(axes, S0_cases):
         rows = data[s0_label]
         ns = [r['N'] for r in rows]
+        ep = euro_put[s0_label]
+        ax.axhline(ep, color='#2ca02c', ls='--', lw=1.5,
+                   label=f'Euro Put (LLH) = {ep:.2f}')
         ax.errorbar(ns, [r['plain_price'] for r in rows],
                     yerr=[1.96 * r['plain_se'] for r in rows],
                     fmt='o-', color='#1f77b4', capsize=4, label='Plain LSM')
-        ax.errorbar(ns, [r['bs_price'] for r in rows],
-                    yerr=[1.96 * r['bs_se'] for r in rows],
-                    fmt='D-', color='#ff7f0e', capsize=4, label='CV-BS')
+        ax.errorbar(ns, [r['llh_price'] for r in rows],
+                    yerr=[1.96 * r['llh_se'] for r in rows],
+                    fmt='^-', color='#d62728', capsize=4, label='CV-LLH')
         ax.set_xscale('log')
         ax.set_xticks(N_values)
         ax.set_xticklabels(tick_labels)
@@ -855,6 +1140,7 @@ def plot_mc_path_convergence(pset_name, label,
     fig.tight_layout()
     fname = f'fig10_price_convergence_{pset_name}.png'
     _savefig(fig, fname)
+    plt.close(fig)
     print(f"  Saved {fname}")
 
     # --- Fig 10b: EEP convergence ---
@@ -867,11 +1153,11 @@ def plot_mc_path_convergence(pset_name, label,
         ns = [r['N'] for r in rows]
         eep_plain = [100 * (r['plain_price'] - r['mc_put']) / r['mc_put']
                      if r['mc_put'] > 0.01 else np.nan for r in rows]
-        eep_bs = [100 * (r['bs_price'] - r['mc_put']) / r['mc_put']
-                  if r['mc_put'] > 0.01 else np.nan for r in rows]
+        eep_llh = [100 * (r['llh_price'] - r['mc_put']) / r['mc_put']
+                   if r['mc_put'] > 0.01 else np.nan for r in rows]
 
         ax.plot(ns, eep_plain, 'o-', color='#1f77b4', label='Plain LSM')
-        ax.plot(ns, eep_bs, 'D-', color='#ff7f0e', label='CV-BS')
+        ax.plot(ns, eep_llh, '^-', color='#d62728', label='CV-LLH')
         ax.set_xscale('log')
         ax.set_xticks(N_values)
         ax.set_xticklabels(tick_labels)
@@ -888,6 +1174,7 @@ def plot_mc_path_convergence(pset_name, label,
     fig.tight_layout()
     fname = f'fig10_eep_convergence_{pset_name}.png'
     _savefig(fig, fname)
+    plt.close(fig)
     print(f"  Saved {fname}")
 
 
@@ -927,23 +1214,35 @@ def _run_param_set(pset_name):
         print(f"  Plot 5: American put panels ({hlbl})...")
         plot_american_put_panels(pset_name, label, hkey)
 
-    print("  Computing American pricing grid (K=100)...")
-    am_grid = _compute_american_grid(pset_name)
+    # Dual basis: Laguerre and Gaussian fig6
+    am_grid_laguerre = None
+    for btype, border, ridge, blabel in [BASIS_LAGUERRE, BASIS_GAUSSIAN]:
+        print(f"  Computing American grid ({blabel})...")
+        am_grid = _compute_american_grid(pset_name, basis_type=btype,
+                                          basis_order=border, ridge=ridge)
+        if btype == 'laguerre':
+            am_grid_laguerre = am_grid
+        gc.collect()
 
-    print("  Plot 6: American prices vs spot...")
-    plot_american_prices_vs_spot(pset_name, label, am_grid)
+        print(f"  Plot 6: American prices vs spot ({blabel})...")
+        plot_american_prices_vs_spot(pset_name, label, am_grid, basis_label=blabel)
 
+    # Reuse Laguerre grid for VR/EEP/price-shift plots
     print("  Plot 7: Variance reduction ratios...")
-    plot_vr_ratios(pset_name, label, am_grid)
+    plot_vr_ratios(pset_name, label, am_grid_laguerre)
 
-    print("  Plot 7b: Price shift (bias in SE units)...")
-    plot_price_shift(pset_name, label, am_grid)
+    print("  Plot 7b: Price shift...")
+    plot_price_shift(pset_name, label, am_grid_laguerre)
 
     print("  Plot 8: Early exercise premium...")
-    plot_eep_bars(pset_name, label, am_grid)
+    plot_eep(pset_name, label, am_grid_laguerre)
+
+    del am_grid_laguerre
+    gc.collect()
 
     print("  Plot 10: MC path convergence (price + EEP)...")
     plot_mc_path_convergence(pset_name, label)
+    gc.collect()
 
 
 def main():
@@ -960,6 +1259,7 @@ def main():
 
     for name in requested:
         _run_param_set(name)
+        gc.collect()
 
     print("\n  Plot 9: BS-limit American put...")
     plot_american_bs_limit()

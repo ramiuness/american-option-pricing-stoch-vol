@@ -3,7 +3,7 @@ LLH (Lin-Lin-He 2024) improved Stein-Stein stochastic volatility model.
 
 Provides Monte Carlo simulation, closed-form European pricing via characteristic
 function / ODE integration, and Black-Scholes baselines.
-See reports/llh-formula.pdf for the theoretical derivation.
+See reports/llh-formula_report.pdf for the theoretical derivation.
 """
 
 from dataclasses import dataclass

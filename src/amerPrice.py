@@ -3,7 +3,7 @@ American put pricing via LSM with optional Rasmussen control variates.
 
 Implements Longstaff-Schwartz (2001) with the functional control-variate
 extension of Rasmussen (2005) under the Lin-Lin-He (2024) improved
-Stein-Stein stochastic volatility model. See american_pricing_report.tex
+Stein-Stein stochastic volatility model. See american_pricing_report.pdf
 section 3.2.2 for the mathematical formulation.
 """
 
@@ -166,15 +166,106 @@ def _euro_put_slice(method, model, sim_out, j, S_col, vol_col, theta_col, tau, K
         raise ValueError("euro_method must be one of {'llh','bs','mc1'}.")
 
 
+# ===================== Shared European precomputation =======================
+
+@dataclass
+class PrecomputedEuropean:
+    """Shared European pricing data for both plain LSM and CV-LLH.
+
+    Attributes
+    ----------
+    tau_cache : dict[int, object]
+        ODE coefficients keyed by steps_remaining (1..M-1).
+    theta_lr : ndarray, (n_paths, n_steps+1)
+        Long-run mean process grid.
+    euro_grid : dict[int, ndarray]
+        European put prices at each step j, shape (n_paths,).
+        j > 1: computed for ITM paths only, zeros for OTM.
+        j == 1: computed for ALL paths (needed by CV-LLH global correction).
+    """
+    tau_cache: dict
+    theta_lr: np.ndarray
+    euro_grid: dict
+
+
+def precompute_european(model, sim_out, K,
+                        phi_max=300.0, n_phi=513, n_steps_rk4=256, eps0=1e-6):
+    """Precompute European put prices shared by plain LSM and CV-LLH.
+
+    Builds ODE coefficients, theta_lr grid, and European put prices at every
+    exercise date. The result can be passed to price_american_put_lsm_llh via
+    the precomputed parameter to avoid redundant computation.
+
+    Parameters
+    ----------
+    model    : ImprovedSteinStein instance
+    sim_out  : dict from model.simulate_prices()
+    K        : strike
+    phi_max, n_phi, n_steps_rk4, eps0 : LLH quadrature params
+
+    Returns
+    -------
+    PrecomputedEuropean
+    """
+    S = sim_out['S']
+    sigma_hat = sim_out['sigma_hat']
+    B = sim_out['B']
+    dt = float(sim_out['dt'])
+
+    n_paths, n_cols = S.shape
+    n_steps = n_cols - 1
+
+    # 1. Long-run mean grid
+    theta_lr = _theta_lr_grid(B, model.theta0, model.lam, model.eta,
+                              dt, n_steps, n_paths)
+
+    # 2. ODE coefficients for each unique remaining maturity
+    tau_cache = {}
+    for j in range(1, n_steps):
+        steps_remaining = n_steps - j
+        if steps_remaining not in tau_cache:
+            tau_cache[steps_remaining] = model.llh_precompute_tau(
+                steps_remaining * dt, phi_max=phi_max, n_phi=n_phi,
+                n_steps_ode=n_steps_rk4, eps0=eps0
+            )
+
+    # 3. European put prices at each exercise date
+    euro_grid = {}
+    for j in range(n_steps - 1, 0, -1):
+        Sj = S[:, j]
+        volj = sigma_hat[:, j]
+        thetaj = theta_lr[:, j]
+        tauj = (n_steps - j) * dt
+        steps_remaining = n_steps - j
+        pre_j = tau_cache.get(steps_remaining)
+
+        if j == 1:
+            # j=1: all paths (CV-LLH global correction needs this)
+            euro_grid[j] = _euro_put_llh_slice(model, Sj, volj, thetaj,
+                                               tauj, K, pre=pre_j)
+        else:
+            # j>1: ITM paths only
+            Ij = np.maximum(K - Sj, 0.0)
+            itm = (Ij > 0.0)
+            Ej = np.zeros(n_paths, dtype=float)
+            if itm.any():
+                thetaj_itm = thetaj[itm]
+                Ej[itm] = _euro_put_llh_slice(model, Sj[itm], volj[itm],
+                                              thetaj_itm, tauj, K, pre=pre_j)
+            euro_grid[j] = Ej
+
+    return PrecomputedEuropean(tau_cache=tau_cache, theta_lr=theta_lr,
+                               euro_grid=euro_grid)
+
+
 # ===================== LSM pricer internals ================================
 
 def _setup(model, sim_out, K, use_cv, euro_method, floor_method,
-           phi_max, n_phi, n_steps_rk4, eps0):
+           phi_max, n_phi, n_steps_rk4, eps0, precomputed=None):
     """Initialize LSM state: arrays, theta grid, maturity payoffs, and ODE cache.
 
-    Extracts simulation arrays, builds the long-run mean process theta_t,
-    sets CF (and CV when use_cv) to the terminal payoff, precomputes ODE
-    coefficients for all needed maturities, and allocates scratch buffers.
+    When precomputed is provided, tau_cache and theta_lr are taken from it,
+    skipping ODE and theta grid construction. Otherwise computes internally.
 
     Returns
     -------
@@ -192,25 +283,29 @@ def _setup(model, sim_out, K, use_cv, euro_method, floor_method,
     n_steps = n_cols - 1
     disc = np.exp(-r * dt)
 
-    # Step 1: theta_t grid (needed when LLH is used for CV or floor)
-    need_theta = (use_cv and euro_method == 'llh') or (not use_cv and floor_method == 'llh')
-    theta_lr = _theta_lr_grid(B, model.theta0, model.lam, model.eta,
-                              dt, n_steps, n_paths) if need_theta else None
+    if precomputed is not None:
+        theta_lr = precomputed.theta_lr
+        tau_cache = precomputed.tau_cache
+    else:
+        # Step 1: theta_t grid (needed when LLH is used for CV or floor)
+        need_theta = (use_cv and euro_method == 'llh') or (not use_cv and floor_method == 'llh')
+        theta_lr = _theta_lr_grid(B, model.theta0, model.lam, model.eta,
+                                  dt, n_steps, n_paths) if need_theta else None
 
-    # Step 2: initialize at maturity t_N
+        # Precompute ODE coefficients for all unique remaining maturities
+        tau_cache = {}
+        if (use_cv and euro_method == 'llh') or (not use_cv and floor_method == 'llh'):
+            for j in range(1, n_steps):
+                steps_remaining = n_steps - j
+                if steps_remaining not in tau_cache:
+                    tau_cache[steps_remaining] = model.llh_precompute_tau(
+                        steps_remaining * dt, phi_max=phi_max, n_phi=n_phi,
+                        n_steps_ode=n_steps_rk4, eps0=eps0
+                    )
+
+    # Initialize at maturity t_N
     CF = np.maximum(K - S[:, -1], 0.0)
     CV = CF.copy() if use_cv else None
-
-    # Precompute ODE coefficients for all unique remaining maturities
-    tau_cache = {}
-    if (use_cv and euro_method == 'llh') or (not use_cv and floor_method == 'llh'):
-        for j in range(1, n_steps):
-            steps_remaining = n_steps - j
-            if steps_remaining not in tau_cache:
-                tau_cache[steps_remaining] = model.llh_precompute_tau(
-                    steps_remaining * dt, phi_max=phi_max, n_phi=n_phi,
-                    n_steps_ode=n_steps_rk4, eps0=eps0
-                )
 
     return {
         'S': S, 'sigma_hat': sigma_hat, 'theta_lr': theta_lr,
@@ -223,12 +318,16 @@ def _setup(model, sim_out, K, use_cv, euro_method, floor_method,
 
 
 def _backward_loop(state, model, sim_out, K, use_cv,
-                   basis_type, basis_order, ridge, euro_method, floor_method):
+                   basis_type, basis_order, ridge, euro_method, floor_method,
+                   precomputed=None):
     """Backward induction from j = N-1 to j = 1.
 
     At each exercise date, fits continuation-value regressions, computes
     the optimal exercise decision (with or without control variates), and
     updates the cash-flow and control-variate vectors in place.
+
+    When precomputed is provided, European prices are read from
+    precomputed.euro_grid[j] instead of being computed on the fly.
 
     Returns
     -------
@@ -249,6 +348,8 @@ def _backward_loop(state, model, sim_out, K, use_cv,
     dt        = state['dt']
     _Ij       = state['_Ij']
     _x        = state['_x']
+
+    euro_grid = precomputed.euro_grid if precomputed is not None else None
 
     CF_1 = CV_1 = None
 
@@ -282,21 +383,23 @@ def _backward_loop(state, model, sim_out, K, use_cv,
             raise ValueError(f"Unknown basis_type: '{basis_type}'")
 
         if use_cv:
-            # Step 3(ii): European PUT E_j via selected method
-            steps_remaining = n_steps - j
-            pre_j = tau_cache.get(steps_remaining) if euro_method == 'llh' else None
-
-            if j == 1 or euro_method == 'mc1':
-                Ej = _euro_put_slice(euro_method, model, sim_out, j,
-                                     Sj, volj, thetaj, tauj, K, llh_pre=pre_j)
+            # Step 3(ii): European PUT E_j
+            if euro_grid is not None:
+                Ej = euro_grid[j]
             else:
-                Ej = np.zeros(n_paths, dtype=float)
-                if itm.any():
-                    thetaj_itm = thetaj[itm] if thetaj is not None else None
-                    Ej[itm] = _euro_put_slice(
-                        euro_method, model, sim_out, j,
-                        Sj[itm], volj[itm], thetaj_itm, tauj, K, llh_pre=pre_j
-                    )
+                steps_remaining = n_steps - j
+                pre_j = tau_cache.get(steps_remaining) if euro_method == 'llh' else None
+                if j == 1 or euro_method == 'mc1':
+                    Ej = _euro_put_slice(euro_method, model, sim_out, j,
+                                         Sj, volj, thetaj, tauj, K, llh_pre=pre_j)
+                else:
+                    Ej = np.zeros(n_paths, dtype=float)
+                    if itm.any():
+                        thetaj_itm = thetaj[itm] if thetaj is not None else None
+                        Ej[itm] = _euro_put_slice(
+                            euro_method, model, sim_out, j,
+                            Sj[itm], volj[itm], thetaj_itm, tauj, K, llh_pre=pre_j
+                        )
 
             # Step 3(ii-iii): 4 regressions with shared Gram matrix
             #   col 0: CF      → tildeV   (continuation value)
@@ -337,13 +440,22 @@ def _backward_loop(state, model, sim_out, K, use_cv,
 
         else:
             # Plain LSM: 1 regression + European floor
-            if floor_method == 'bs':
-                Ej = _euro_put_bs_slice(model, Sj, volj, tauj, K)
+            if euro_grid is not None:
+                Ej = euro_grid[j]
+            elif floor_method == 'none':
+                Ej = np.zeros(n_paths, dtype=float)
+            elif floor_method in ('bs', 'mc1'):
+                Ej = _euro_put_slice(floor_method, model, sim_out, j,
+                                     Sj, volj, thetaj, tauj, K)
             else:
                 steps_remaining = n_steps - j
                 pre_j = tau_cache.get(steps_remaining)
-                Ej = _euro_put_slice(floor_method, model, sim_out, j,
-                                     Sj, volj, thetaj, tauj, K, llh_pre=pre_j)
+                Ej = np.zeros(n_paths, dtype=float)
+                if itm.any():
+                    thetaj_itm = thetaj[itm] if thetaj is not None else None
+                    Ej[itm] = _euro_put_slice(
+                        floor_method, model, sim_out, j,
+                        Sj[itm], volj[itm], thetaj_itm, tauj, K, llh_pre=pre_j)
 
             if itm.any():
                 Phi = Phi_all[itm, :]
@@ -430,6 +542,12 @@ def _improved_estimator(state, CF_1, CV_1, model, K,
     theta_global = 0.0 if varX <= 1e-16 else float(
         (X * Y).sum() / ((n_paths - 1) * varX))
 
+    # Theoretical VR: 1/(1 - rho^2) where rho^2 = Cov^2 / (Var_CF * Var_CV)
+    varY = Y.var(ddof=1)
+    covXY = (X * Y).sum() / (n_paths - 1)
+    rho_sq = 0.0 if (varX <= 1e-16 or varY <= 1e-16) else (covXY**2) / (varX * varY)
+    vr = 1.0 / (1.0 - rho_sq) if rho_sq < 1.0 else np.inf
+
     imp_samples = disc * (CF_1 - theta_global * (CV_1 - E_0))
     price_imp = max(I0, float(imp_samples.mean()))
     std_err_imp = imp_samples.std(ddof=1) / np.sqrt(n_paths)
@@ -440,6 +558,8 @@ def _improved_estimator(state, CF_1, CV_1, model, K,
         'price_imp': price_imp,
         'std_err_imp': std_err_imp,
         'ci_95_imp': ci95_imp,
+        'rho_squared': rho_sq,
+        'vr': vr,
     }
 
 
@@ -448,8 +568,9 @@ def _improved_estimator(state, CF_1, CV_1, model, K,
 def price_american_put_lsm_llh(model, sim_out, K, basis_order=None,
                                basis_type='laguerre',
                                use_cv=True, improved=True, ridge=1e-5,
-                               euro_method='llh', floor_method='bs',
-                               phi_max=300.0, n_phi=513, n_steps_rk4=128, eps0=1e-6):
+                               euro_method='llh', floor_method='llh',
+                               phi_max=300.0, n_phi=513, n_steps_rk4=256, eps0=1e-6,
+                               precomputed=None):
     """
     LSM American put pricer with optional Rasmussen control variates.
 
@@ -465,6 +586,8 @@ def price_american_put_lsm_llh(model, sim_out, K, basis_order=None,
     floor_method : 'bs' | 'llh' — European floor for exercise safety when use_cv=False.
                    Default 'bs' is fast; 'llh' is accurate but ~100x slower.
     phi_max, n_phi, n_steps_rk4, eps0 : LLH quadrature params (only when euro_method='llh')
+    precomputed  : PrecomputedEuropean or None — shared European grid from
+                   precompute_european(). Skips ODE and European pricing when provided.
 
     Returns
     -------
@@ -494,11 +617,12 @@ def price_american_put_lsm_llh(model, sim_out, K, basis_order=None,
         basis_order = 5 if basis_type == 'gaussian' else 2
 
     state = _setup(model, sim_out, K, use_cv, euro_method, floor_method,
-                   phi_max, n_phi, n_steps_rk4, eps0)
+                   phi_max, n_phi, n_steps_rk4, eps0, precomputed=precomputed)
 
     CF_1, CV_1 = _backward_loop(state, model, sim_out, K, use_cv,
                                  basis_type, basis_order, ridge,
-                                 euro_method, floor_method)
+                                 euro_method, floor_method,
+                                 precomputed=precomputed)
 
     out = _base_estimator(state, CF_1, K)
 

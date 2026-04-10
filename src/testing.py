@@ -54,8 +54,7 @@ def basis_comparison_grid(params, K, S0_grid, moneyness_labels,
             row[f'{name}_cv_time'] = time.perf_counter() - t0
             row[f'{name}_cv_price'] = res_cv.get('price_imp', res_cv['price'])
             row[f'{name}_cv_se'] = res_cv.get('std_err_imp', res_cv['std_err'])
-            row[f'{name}_cv_vr'] = (res_p['std_err'] / row[f'{name}_cv_se'])**2 \
-                if row[f'{name}_cv_se'] > 0 else np.nan
+            row[f'{name}_cv_vr'] = res_cv.get('vr', np.nan)
 
         rows.append(row)
         print(f"  {mlabel}: done")
@@ -92,7 +91,7 @@ def basis_sensitivity(params, S0, K, T, n_steps_mc, n_paths, seed,
             'Plain SE': res_p['std_err'],
             'CV-LLH price': res_cv.get('price_imp', res_cv['price']),
             'CV-LLH SE': res_cv.get('std_err_imp', res_cv['std_err']),
-            'VR': (res_p['std_err'] / res_cv.get('std_err_imp', res_cv['std_err']))**2,
+            'VR': res_cv.get('vr', np.nan),
         })
         print(f"  M={m}: Plain={res_p['price']:.4f}, "
               f"CV-LLH={res_cv.get('price_imp', res_cv['price']):.4f}")

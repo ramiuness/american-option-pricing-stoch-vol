@@ -5,11 +5,8 @@ Usage (from project root):
     cd src && python timing_analysis.py
 
 Produces:
-    figs/fig_timing_breakdown.png   - stage-wise wall time (horizontal bar)
-    figs/fig_scaling_N.png          - wall time vs N (paths)
-    figs/fig_scaling_M.png          - wall time vs M (exercise dates)
-    figs/fig_scaling_P.png          - wall time vs P (quadrature nodes)
-    figs/fig_timing_comparison.png  - Plain vs CV-BS vs CV-LLH cost-precision
+    figs/fig_timing_combined.png    - 1x2: stage breakdown + cost-precision scatter
+    figs/fig_scaling_all.png        - 1x3: wall time vs N, M, P
 """
 
 import sys, os, time
@@ -44,7 +41,7 @@ STYLE = {
 PARAMS = dict(r=0.01, kappa=5, nu=0.2, lam=0.9, eta=0.01, rho=-0.2,
               sigma0=0.15, theta0=0.18)
 S0, K_STRIKE, T = 100.0, 100.0, 1.0
-N_DEFAULT, M_DEFAULT, P_DEFAULT, K_RK4 = 10_000, 52, 513, 128
+N_DEFAULT, M_DEFAULT, P_DEFAULT, K_RK4 = 10_000, 52, 513, 256
 SEED = 42
 
 
@@ -56,68 +53,65 @@ def _savefig(fig, name):
 
 
 def _time_stages(n_paths, n_steps_mc, n_phi, n_steps_rk4, seed=SEED):
-    """Time each stage (simulation, ODE precomputation, backward loop) of LSM+CV-LLH."""
+    """Time each stage: simulation, shared European precomp, plain backward, CV-LLH backward."""
     model = pm.ImprovedSteinStein(**PARAMS, seed=seed)
+    ode_kw = dict(phi_max=300.0, n_phi=n_phi, n_steps_rk4=n_steps_rk4)
 
     # 1. Simulation
     t0 = time.perf_counter()
     sim = model.simulate_prices(S0=S0, T=T, n_steps_mc=n_steps_mc, n_paths=n_paths)
     t_sim = time.perf_counter() - t0
 
-    # 2. ODE precomputation
-    dt = T / n_steps_mc
+    # 2. Shared European precomputation (ODE + European prices)
     t0 = time.perf_counter()
-    tau_cache = {}
-    for j in range(1, n_steps_mc):
-        sr = n_steps_mc - j
-        if sr not in tau_cache:
-            tau_cache[sr] = model.llh_precompute_tau(
-                sr * dt, phi_max=300.0, n_phi=n_phi, n_steps_ode=n_steps_rk4)
-    t_ode = time.perf_counter() - t0
+    pre = ap.precompute_european(model, sim, K=K_STRIKE, **ode_kw)
+    t_precomp = time.perf_counter() - t0
 
-    # 3. Full pricer
+    # 3. Plain LSM backward (with precomputed European grid)
+    t0 = time.perf_counter()
+    res_plain = ap.price_american_put_lsm_llh(
+        model, sim, K=K_STRIKE, use_cv=False, precomputed=pre)
+    t_plain_backward = time.perf_counter() - t0
+
+    # 4. CV-LLH backward (with precomputed European grid)
     t0 = time.perf_counter()
     result = ap.price_american_put_lsm_llh(
         model, sim, K=K_STRIKE, use_cv=True, euro_method='llh',
-        phi_max=300.0, n_phi=n_phi, n_steps_rk4=n_steps_rk4)
-    t_pricer = time.perf_counter() - t0
-
-    t_backward = max(0, t_pricer - t_ode)
-
-    # 4. Plain LSM (reuse same sim)
-    t0 = time.perf_counter()
-    res_plain = ap.price_american_put_lsm_llh(
-        model, sim, K=K_STRIKE, use_cv=False)
-    t_plain_backward = time.perf_counter() - t0
+        precomputed=pre)
+    t_llh_backward = time.perf_counter() - t0
 
     return {
         'Simulation': t_sim,
-        'ODE precomp': t_ode,
-        'Backward loop': t_backward,
-        'Total': t_sim + t_pricer,
-        'Plain_sim': t_sim,
+        'Precompute': t_precomp,
         'Plain_backward': t_plain_backward,
-        'Plain_total': t_sim + t_plain_backward,
+        'LLH_backward': t_llh_backward,
+        'Plain_total': t_sim + t_precomp + t_plain_backward,
+        'LLH_total': t_sim + t_precomp + t_llh_backward,
+        'Total': t_sim + t_precomp + t_plain_backward + t_llh_backward,
         'price_imp': result.get('price_imp', result['price']),
         'std_err_imp': result.get('std_err_imp', result['std_err']),
     }
 
 
 def _time_method(method, n_paths, n_steps_mc, seed=SEED, **kw):
-    """Time a single pricing method ('plain', 'bs', or 'llh') end-to-end."""
+    """Time a single pricing method end-to-end (sim + precomp + pricer)."""
     model = pm.ImprovedSteinStein(**PARAMS, seed=seed)
     sim = model.simulate_prices(S0=S0, T=T, n_steps_mc=n_steps_mc, n_paths=n_paths)
+    ode_kw = dict(phi_max=300.0, n_phi=P_DEFAULT, n_steps_rk4=K_RK4)
+
     t0 = time.perf_counter()
     if method == 'plain':
+        pre = ap.precompute_european(model, sim, K=K_STRIKE, **ode_kw)
         res = ap.price_american_put_lsm_llh(model, sim, K=K_STRIKE,
-                                              use_cv=False)
+                                              use_cv=False, precomputed=pre)
     elif method == 'bs':
         res = ap.price_american_put_lsm_llh(model, sim, K=K_STRIKE,
                                               use_cv=True, euro_method='bs')
     elif method == 'llh':
+        pre = ap.precompute_european(model, sim, K=K_STRIKE, **ode_kw)
         res = ap.price_american_put_lsm_llh(model, sim, K=K_STRIKE,
                                               use_cv=True, euro_method='llh',
-                                              **kw)
+                                              precomputed=pre)
     return time.perf_counter() - t0, res
 
 
@@ -125,54 +119,125 @@ def _time_method(method, n_paths, n_steps_mc, seed=SEED, **kw):
 # Plot 1: Stage breakdown (horizontal bar chart)
 # ===================================================================
 
-def plot_stage_breakdown():
-    """Generate horizontal bar chart comparing Plain LSM and CV-LLH wall-time breakdown."""
+def plot_timing_breakdown():
+    """Single-panel figure: stage breakdown horizontal bar chart."""
     s = _time_stages(N_DEFAULT, M_DEFAULT, P_DEFAULT, K_RK4)
 
-    # Two groups with a gap: Plain LSM (top), CV-LLH (bottom)
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+
     labels = [
-        'Plain LSM\nSimulation',
-        'Plain LSM\nBackward loop',
+        'Simulation',
+        'European precomp\n(shared)',
         '',  # gap
-        'CV-LLH\nSimulation',
-        'CV-LLH\nODE precomputation',
+        'Plain LSM\nBackward loop',
         'CV-LLH\nBackward loop',
     ]
     sizes = [
-        s['Plain_sim'], s['Plain_backward'],
+        s['Simulation'], s['Precompute'],
         0,
-        s['Simulation'], s['ODE precomp'], s['Backward loop'],
+        s['Plain_backward'], s['LLH_backward'],
     ]
-    colors = ['#1f77b4', '#d62728',
+    colors = ['#1f77b4', '#ff7f0e',
               'white',
-              '#1f77b4', '#ff7f0e', '#d62728']
-    totals = [s['Plain_total'], s['Plain_total'],
-              0,
-              s['Total'], s['Total'], s['Total']]
+              '#d62728', '#d62728']
 
-    fig, ax = plt.subplots(figsize=(9, 4.5))
-    y = np.array([0, 1, 2, 3, 4, 5], dtype=float)
+    y = np.array([0, 1, 2, 3, 4], dtype=float)
     bars = ax.barh(y, sizes, color=colors, alpha=0.85, height=0.5)
 
-    max_val = s['Total']
-    for bar, val, tot in zip(bars, sizes, totals):
+    max_val = max(sizes)
+    for bar, val in zip(bars, sizes):
         if val > 0:
-            pct = 100 * val / tot
             ax.text(bar.get_width() + max_val * 0.01,
                     bar.get_y() + bar.get_height() / 2,
-                    f'{val:.2f}s ({pct:.0f}%)', va='center', fontsize=9)
+                    f'{val:.2f}s', va='center', fontsize=9)
 
-    ax.set_yticks([i for i in range(6) if i != 2])
+    ax.set_yticks([i for i in range(5) if i != 2])
     ax.set_yticklabels([l for l in labels if l])
     ax.set_xlabel('Wall time (s)')
     ax.set_xlim(0, max_val * 1.3)
     ax.invert_yaxis()
+
     fig.suptitle(
         f'Wall-time breakdown: Plain LSM vs LSM+CV-LLH\n'
         f'$N={N_DEFAULT:,}$, $M={M_DEFAULT}$, $P={P_DEFAULT}$',
         fontsize=13, y=1.02)
     fig.tight_layout()
     _savefig(fig, 'fig_timing_breakdown.png')
+
+
+def plot_timing_combined():
+    """1x2 figure: (left) stage breakdown bar chart, (right) cost-precision scatter."""
+    s = _time_stages(N_DEFAULT, M_DEFAULT, P_DEFAULT, K_RK4)
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+
+    # --- Left panel: stage breakdown (shared precomp + per-method backward) ---
+    labels = [
+        'Simulation',
+        'European precomp\n(shared)',
+        '',  # gap
+        'Plain LSM\nBackward loop',
+        'CV-LLH\nBackward loop',
+    ]
+    sizes = [
+        s['Simulation'], s['Precompute'],
+        0,
+        s['Plain_backward'], s['LLH_backward'],
+    ]
+    colors = ['#1f77b4', '#ff7f0e',
+              'white',
+              '#d62728', '#d62728']
+
+    y = np.array([0, 1, 2, 3, 4], dtype=float)
+    bars = ax1.barh(y, sizes, color=colors, alpha=0.85, height=0.5)
+
+    max_val = max(sizes)
+    for bar, val in zip(bars, sizes):
+        if val > 0:
+            ax1.text(bar.get_width() + max_val * 0.01,
+                     bar.get_y() + bar.get_height() / 2,
+                     f'{val:.2f}s', va='center', fontsize=9)
+
+    ax1.set_yticks([i for i in range(5) if i != 2])
+    ax1.set_yticklabels([l for l in labels if l])
+    ax1.set_xlabel('Wall time (s)')
+    ax1.set_xlim(0, max_val * 1.3)
+    ax1.invert_yaxis()
+    ax1.set_title('Wall-time breakdown')
+
+    # --- Right panel: cost-precision scatter ---
+    methods = [('plain', 'Plain LSM', N_DEFAULT),
+               ('llh',   'CV-LLH',    N_DEFAULT)]
+    mcolors = {'Plain LSM': '#1f77b4', 'CV-LLH': '#d62728'}
+    markers = {'Plain LSM': 'o', 'CV-LLH': '^'}
+
+    for method, label, n in methods:
+        kw = dict(phi_max=300.0, n_phi=P_DEFAULT, n_steps_rk4=K_RK4) if method == 'llh' else {}
+        elapsed, res = _time_method(method, n, M_DEFAULT, **kw)
+        se = res.get('std_err_imp', res['std_err'])
+        print(f"  {label}: {elapsed:.3f}s, SE={se:.6f}, N={n}")
+
+        ax2.scatter(elapsed, se, s=120, marker=markers[label],
+                    color=mcolors[label], zorder=5, label=label)
+        ax2.annotate(f"{label}\nSE={se:.4f}\n{elapsed:.2f}s",
+                     xy=(elapsed, se),
+                     xytext=(15, 10), textcoords='offset points',
+                     fontsize=9, color=mcolors[label],
+                     arrowprops=dict(arrowstyle='->', color=mcolors[label], lw=0.8))
+
+    ax2.set_xscale('log')
+    ax2.set_yscale('log')
+    ax2.set_xlabel('Wall time (s)')
+    ax2.set_ylabel('Standard error')
+    ax2.set_title('Cost--precision tradeoff')
+    ax2.legend(fontsize=10)
+
+    fig.suptitle(
+        f'Plain LSM vs LSM+CV-LLH ($N={N_DEFAULT:,}$, $M={M_DEFAULT}$, '
+        f'$S_0={S0:.0f}$, $K={K_STRIKE:.0f}$, $T={T}$, Table~1)',
+        fontsize=13, y=1.03)
+    fig.tight_layout()
+    _savefig(fig, 'fig_timing_combined.png')
 
 
 # ===================================================================
@@ -185,8 +250,8 @@ def _scaling_plot(param_name, param_sym, values, fixed_label,
     times = []
     for v in values:
         s = vary_fn(v)
-        times.append(s['Total'])
-        print(f"  {param_name}={v}: {s['Total']:.3f}s")
+        times.append(s['LLH_total'])
+        print(f"  {param_name}={v}: {s['LLH_total']:.3f}s")
 
     fig, ax = plt.subplots(figsize=(7, 5))
     ax.plot(values, times, f'{marker}-', color=color)
@@ -201,7 +266,7 @@ def _scaling_plot(param_name, param_sym, values, fixed_label,
 
 def plot_scaling_N():
     """Plot wall-time scaling with number of MC paths N."""
-    _scaling_plot('N', '$N$ (paths)', [1000, 2000, 5000, 10000, 20000, 50000],
+    _scaling_plot('N', '$N$ (paths)', [1000, 2000, 5000, 10000],
                   f'$M={M_DEFAULT}$, $P={P_DEFAULT}$',
                   '#d62728', 'o', 'fig_scaling_N.png',
                   lambda n: _time_stages(n, M_DEFAULT, P_DEFAULT, K_RK4))
@@ -227,54 +292,14 @@ def plot_scaling_P():
 # Plot 5: Method comparison (cost vs precision)
 # ===================================================================
 
-def plot_method_comparison():
-    """Generate grouped bar chart comparing wall time and SE for Plain, CV-BS, and CV-LLH."""
-    methods = [('plain', 'Plain LSM', N_DEFAULT),
-               ('bs',    'CV-BS',     N_DEFAULT),
-               ('llh',   'CV-LLH',    5000)]
-    labels, times, ses = [], [], []
-    colors = ['#1f77b4', '#ff7f0e', '#d62728']
-
-    for method, label, n in methods:
-        kw = dict(phi_max=300.0, n_phi=P_DEFAULT, n_steps_rk4=K_RK4) if method == 'llh' else {}
-        elapsed, res = _time_method(method, n, M_DEFAULT, **kw)
-        se = res.get('std_err_imp', res['std_err'])
-        labels.append(label)
-        times.append(elapsed)
-        ses.append(se)
-        print(f"  {label}: {elapsed:.3f}s, SE={se:.6f}, N={n}")
-
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
-    x = np.arange(len(labels))
-
-    ax1.bar(x, times, color=colors, alpha=0.85)
-    ax1.set_xticks(x)
-    ax1.set_xticklabels(labels)
-    ax1.set_ylabel('Wall time (s)')
-    ax1.set_title('Computation time')
-
-    ax2.bar(x, ses, color=colors, alpha=0.85)
-    ax2.set_xticks(x)
-    ax2.set_xticklabels(labels)
-    ax2.set_ylabel('Standard error')
-    ax2.set_title('Estimator precision')
-
-    fig.suptitle(
-        f'Cost--precision tradeoff\n'
-        f'$S_0={S0:.0f}$, $K={K_STRIKE:.0f}$, $T={T}$, Table~1 params',
-        fontsize=13, y=1.02)
-    fig.tight_layout()
-    _savefig(fig, 'fig_timing_comparison.png')
-
-
 # ===================================================================
-# Plot 6: Combined scaling (1x3 horizontal)
+# Scaling experiments (1x3 horizontal)
 # ===================================================================
 
 def plot_scaling_all():
     """Generate combined 1x3 figure showing wall-time scaling with N, M, and P."""
     configs = [
-        ('N', '$N$ (paths)', [1000, 2000, 5000, 10000, 20000, 50000],
+        ('N', '$N$ (paths)', [1000, 2000, 5000, 10000],
          f'$M={M_DEFAULT}$, $P={P_DEFAULT}$', '#d62728', 'o',
          lambda v: _time_stages(v, M_DEFAULT, P_DEFAULT, K_RK4)),
         ('M', '$M$ (exercise dates)', [12, 22, 52, 104, 252],
@@ -291,8 +316,8 @@ def plot_scaling_all():
         times = []
         for v in values:
             s = vary_fn(v)
-            times.append(s['Total'])
-            print(f"  {name}={v}: {s['Total']:.3f}s")
+            times.append(s['LLH_total'])
+            print(f"  {name}={v}: {s['LLH_total']:.3f}s")
         ax.plot(values, times, f'{marker}-', color=color)
         ax.set_xlabel(sym)
         ax.set_title(fixed, fontsize=10)
@@ -309,12 +334,10 @@ def main():
     """Entry point: generate all timing analysis figures."""
     plt.rcParams.update(STYLE)
 
-    print("=== Stage breakdown ===")
-    plot_stage_breakdown()
+    print("=== Timing breakdown ===")
+    plot_timing_breakdown()
     print("\n=== Scaling (combined) ===")
     plot_scaling_all()
-    print("\n=== Method comparison ===")
-    plot_method_comparison()
     print("\nDone.")
 
 

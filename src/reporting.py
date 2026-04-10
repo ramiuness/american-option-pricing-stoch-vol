@@ -203,9 +203,9 @@ def american_put_comparison(model, K, S0_grid, moneyness_labels, T, n_steps_mc,
     """
     Price American puts across moneyness levels.
 
-    When include_llh=True (default), three methods are compared: Plain LSM,
-    CV-BS, and CV-LLH.  When include_llh=False, only Plain LSM and CV-BS are
-    computed (no LLH ODE solver is invoked).
+    When include_llh=True (default), two methods are compared: Plain LSM
+    and CV-LLH.  When include_llh=False, only Plain LSM is computed
+    (no LLH ODE solver is invoked).
 
     Returns a DataFrame with columns for each method's price, SE, CI width,
     variance reduction ratio (VR), and MC European put price.
@@ -214,7 +214,7 @@ def american_put_comparison(model, K, S0_grid, moneyness_labels, T, n_steps_mc,
     for s0, label in zip(S0_grid, moneyness_labels):
         row = {'Moneyness': label, 'S0': s0}
 
-        # --- Shared simulation for plain LSM + CV-BS (n_paths) ---
+        # --- Simulation ---
         m = pm.ImprovedSteinStein(**_model_attrs(model), seed=seed)
         sim = m.simulate_prices(S0=s0, T=T, n_steps_mc=n_steps_mc, n_paths=n_paths)
 
@@ -229,21 +229,10 @@ def american_put_comparison(model, K, S0_grid, moneyness_labels, T, n_steps_mc,
         row['Plain_se'] = res_plain['std_err']
         row['Plain_ci_w'] = res_plain['ci_95'][1] - res_plain['ci_95'][0]
 
-        # CV-BS
-        res_bs = m.price_american_put(sim, K=K, use_cv=True, euro_method='bs', ridge=1e-5)
-        row['BS_price'] = res_bs.get('price_imp', res_bs['price'])
-        row['BS_se'] = res_bs.get('std_err_imp', res_bs['std_err'])
-        ci_bs = res_bs.get('ci_95_imp', res_bs['ci_95'])
-        row['BS_ci_w'] = ci_bs[1] - ci_bs[0]
-        row['BS_VR'] = (res_plain['std_err'] / row['BS_se'])**2 if row['BS_se'] > 0 else np.nan
-
         if include_llh:
             # --- Separate simulation for CV-LLH (n_paths_llh) ---
             m2 = pm.ImprovedSteinStein(**_model_attrs(model), seed=seed)
             sim_llh = m2.simulate_prices(S0=s0, T=T, n_steps_mc=n_steps_mc, n_paths=n_paths_llh)
-
-            # Plain LSM on the same small sim (for apples-to-apples VR)
-            res_plain_small = m2.price_american_put(sim_llh, K=K, use_cv=False, ridge=1e-5)
 
             # CV-LLH
             res_llh = m2.price_american_put(sim_llh, K=K, use_cv=True, euro_method='llh',
@@ -252,7 +241,7 @@ def american_put_comparison(model, K, S0_grid, moneyness_labels, T, n_steps_mc,
             row['LLH_se'] = res_llh.get('std_err_imp', res_llh['std_err'])
             ci_llh = res_llh.get('ci_95_imp', res_llh['ci_95'])
             row['LLH_ci_w'] = ci_llh[1] - ci_llh[0]
-            row['LLH_VR'] = (res_plain_small['std_err'] / row['LLH_se'])**2 if row['LLH_se'] > 0 else np.nan
+            row['LLH_VR'] = res_llh.get('vr', np.nan)
 
         rows.append(row)
 
@@ -270,9 +259,6 @@ def format_results_table(df):
         'MC Put SE':     df['MC_put_se'].round(4),
         'LSM Price':     df['Plain_price'].round(4),
         'LSM SE':        df['Plain_se'].round(4),
-        'CV-BS Price':   df['BS_price'].round(4),
-        'CV-BS SE':      df['BS_se'].round(4),
-        'CV-BS VR':      df['BS_VR'].round(1),
     }
     if 'LLH_price' in df.columns:
         cols['CV-LLH Price'] = df['LLH_price'].round(4)
@@ -291,7 +277,7 @@ def build_vr_summary(results_dict):
 
     Returns
     -------
-    vr_df : DataFrame with columns Setting, Moneyness, CV-BS VR, CV-LLH VR
+    vr_df : DataFrame with columns Setting, Moneyness, CV-LLH VR
     """
     vr_rows = []
     for label, df in results_dict.items():
@@ -299,57 +285,49 @@ def build_vr_summary(results_dict):
             vr_rows.append({
                 'Setting': label,
                 'Moneyness': row['Moneyness'],
-                'CV-BS VR': row['BS_VR'],
                 'CV-LLH VR': row['LLH_VR'],
             })
     return pd.DataFrame(vr_rows)
 
 
 def plot_vr_bars(vr_df, moneyness_labels):
-    """Plot grouped bar charts of variance reduction ratios for CV-BS and CV-LLH.
+    """Plot bar chart of CV-LLH variance reduction ratios.
 
     Parameters
     ----------
     vr_df            : DataFrame from build_vr_summary(), with columns
-                       Setting, Moneyness, CV-BS VR, CV-LLH VR
+                       Setting, Moneyness, CV-LLH VR
     moneyness_labels : list of str used to order the x-axis categories
     """
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharey=True)
-    for ax, method, col in zip(axes, ['CV-BS', 'CV-LLH'], ['CV-BS VR', 'CV-LLH VR']):
-        pivot = vr_df.pivot(index='Moneyness', columns='Setting', values=col)
-        pivot.loc[moneyness_labels].plot.bar(ax=ax, rot=0)
-        ax.set_title(f'Variance Reduction Ratio — {method}')
-        ax.set_ylabel('VR Ratio')
-        ax.axhline(y=1, color='gray', linestyle='--', alpha=0.5, label='VR = 1')
-        ax.legend(title='Setting', fontsize=8)
+    fig, ax = plt.subplots(figsize=(10, 5))
+    pivot = vr_df.pivot(index='Moneyness', columns='Setting', values='CV-LLH VR')
+    pivot.loc[moneyness_labels].plot.bar(ax=ax, rot=0)
+    ax.set_title('Variance Reduction Ratio — CV-LLH')
+    ax.set_ylabel('VR Ratio')
+    ax.axhline(y=1, color='gray', linestyle='--', alpha=0.5, label='VR = 1')
+    ax.legend(title='Setting', fontsize=8)
     plt.tight_layout()
     plt.show()
 
 
-def plot_american_put_prices(df, title='', cv_method='llh'):
+def plot_american_put_prices(df, title=''):
     """
-    Line chart: MC Put, Plain LSM, and a CV American put price vs S0.
+    Line chart: MC Put, Plain LSM, and CV-LLH American put price vs S0.
 
     Parameters
     ----------
     df         : raw DataFrame from american_put_comparison()
     title      : figure title string
-    cv_method  : 'llh' (default) or 'bs' — selects which CV series to plot
     """
     s0 = df['S0'].values
-
-    if cv_method == 'bs':
-        cv_price, cv_se, cv_label = df['BS_price'], df['BS_se'], 'LSM + CV-BS'
-    else:
-        cv_price, cv_se, cv_label = df['LLH_price'], df['LLH_se'], 'LSM + CV-LLH'
 
     fig, ax = plt.subplots(figsize=(7, 5))
 
     ax.plot(s0, df['MC_put_price'], 's--', color='#2ca02c', label='Euro Put (MC)')
     ax.errorbar(s0, df['Plain_price'], yerr=1.96 * df['Plain_se'],
                 fmt='o-', color='#1f77b4', capsize=4, label='Plain LSM')
-    ax.errorbar(s0, cv_price, yerr=1.96 * cv_se,
-                fmt='^-', color='#d62728', capsize=4, label=cv_label)
+    ax.errorbar(s0, df['LLH_price'], yerr=1.96 * df['LLH_se'],
+                fmt='^-', color='#d62728', capsize=4, label='LSM + CV-LLH')
 
     ax.set_xlabel('$S_0$')
     ax.set_ylabel('Put price')
@@ -369,7 +347,7 @@ def build_eep_table(results_dict, models_dict, K,
     raw DataFrames from american_put_comparison).  The LLH analytical
     European put is included as a reference column.
 
-    Includes EEP for Plain LSM, CV-BS, and (when present) CV-LLH.
+    Includes EEP for Plain LSM and (when present) CV-LLH.
 
     Parameters
     ----------
@@ -400,9 +378,6 @@ def build_eep_table(results_dict, models_dict, K,
             am_lsm = row['Plain_price']
             eep_lsm = am_lsm - mc_put
 
-            am_bs = row['BS_price']
-            eep_bs = am_bs - mc_put
-
             entry = {
                 'Params': params_label,
                 'Horizon': horizon_label,
@@ -413,9 +388,6 @@ def build_eep_table(results_dict, models_dict, K,
                 'Amer Put (LSM)': round(am_lsm, 4),
                 'EEP (LSM)': round(eep_lsm, 4),
                 'EEP % (LSM)': round(eep_lsm / mc_put * 100, 2) if mc_put > 0.01 else np.nan,
-                'Amer Put (CV-BS)': round(am_bs, 4),
-                'EEP (CV-BS)': round(eep_bs, 4),
-                'EEP % (CV-BS)': round(eep_bs / mc_put * 100, 2) if mc_put > 0.01 else np.nan,
             }
 
             if has_llh:
@@ -436,7 +408,7 @@ def plot_eep_table(eep_df):
     Multi-panel grouped bar chart of the early exercise premium by method.
 
     Layout: one row per parameter set, one column per horizon.
-    Each panel shows grouped bars (LSM, CV-BS, and optionally CV-LLH)
+    Each panel shows grouped bars (LSM and optionally CV-LLH)
     across moneyness levels.
 
     Parameters
@@ -449,12 +421,10 @@ def plot_eep_table(eep_df):
     n_rows = len(params_list)
     n_cols = len(horizon_list)
 
-    has_llh = 'EEP % (CV-LLH)' in eep_df.columns
-
-    methods = ['EEP % (LSM)', 'EEP % (CV-BS)']
-    labels = ['Plain LSM', 'CV-BS']
-    colors = ['#1f77b4', '#d62728']
-    if has_llh:
+    methods = ['EEP % (LSM)']
+    labels = ['Plain LSM']
+    colors = ['#1f77b4']
+    if 'EEP % (CV-LLH)' in eep_df.columns:
         methods.append('EEP % (CV-LLH)')
         labels.append('CV-LLH')
         colors.append('#ff7f0e')
@@ -522,18 +492,13 @@ def build_timing_table(model, K, S0, horizons, n_paths, n_paths_llh,
         T, n_steps = hparams['T'], hparams['n_steps_mc']
         m = pm.ImprovedSteinStein(**_model_attrs(model), seed=seed)
 
-        # Shared simulation for plain + CV-BS
+        # Simulation for plain LSM
         sim = m.simulate_prices(S0=S0, T=T, n_steps_mc=n_steps, n_paths=n_paths)
 
         # Plain LSM
         t0 = time.perf_counter()
         res_p = m.price_american_put(sim, K=K, use_cv=False, ridge=1e-5)
         t_plain = time.perf_counter() - t0
-
-        # CV-BS
-        t0 = time.perf_counter()
-        res_b = m.price_american_put(sim, K=K, use_cv=True, euro_method='bs', ridge=1e-5)
-        t_bs = time.perf_counter() - t0
 
         # CV-LLH
         sim_llh = m.simulate_prices(S0=S0, T=T, n_steps_mc=n_steps, n_paths=n_paths_llh)
@@ -546,8 +511,6 @@ def build_timing_table(model, K, S0, horizons, n_paths, n_paths_llh,
             'Horizon': horizon_label,
             'Plain LSM (s)':  round(t_plain, 3),
             'Plain LSM SE':   round(res_p['std_err'], 4),
-            'CV-BS (s)':      round(t_bs, 3),
-            'CV-BS SE':       round(res_b.get('std_err_imp', res_b['std_err']), 4),
             'CV-LLH (s)':     round(t_llh, 3),
             'CV-LLH SE':      round(res_l.get('std_err_imp', res_l['std_err']), 4),
         })
