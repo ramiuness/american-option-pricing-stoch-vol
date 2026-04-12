@@ -90,18 +90,42 @@ def llh_vs_mc_timing(model, S0, K, scenarios, n_paths,
     -------
     pd.DataFrame with columns: Label, tau, LLH, MC, Time_LLH, Time_MC, Speedup
 
+    What is being measured
+    ----------------------
+    Both legs measure the **full single-query cost** for one ``(S0, K)`` cell
+    at each scenario maturity, started from cold every iteration.
+
+    - **LLH**: ``llh_precompute_tau`` (RK4 ODE integration over the
+      characteristic-exponent system) + ``_build_transform_vec`` +
+      ``_compute_P_vec``. No precompute reuse: production callers such as
+      ``generate_plots._compute_mc_llh_grid`` and
+      ``amerPrice.price_american_put_lsm_llh`` cache ``pre`` across many
+      cells, so the per-cell LLH cost in those contexts is much smaller
+      than what this table reports.
+    - **MC**: ``simulate_prices`` (correlated normals → Brownian → sigma_hat
+      → multiplicative Euler) + ``price_call_mc`` (terminal payoff and SE).
+      Note that ``simulate_prices`` returns ``W``, ``B``, ``W2``,
+      ``sigma_hat`` in addition to the price paths; only the price paths
+      are consumed by ``price_call_mc``, but allocation of the unused
+      arrays IS counted in the reported time. This is a known upward bias
+      on the MC leg.
+
     Timing
     ------
-    One warmup call is discarded, then ``n_runs`` repetitions are timed with
-    ``time.perf_counter()``. Reported times are the median across runs.
+    Each scenario runs ``n_runs`` repetitions of each leg, timed with
+    ``time.perf_counter()`` (wall clock). The reported time is
+    ``np.median`` across runs, which absorbs single-run outliers from
+    cold-start effects (BLAS init, page faulting) without needing an
+    explicit warmup.
+
+    Note that ``n_runs`` averages over **timing noise**, not MC variance:
+    ``model.seed`` is fixed and ``simulate_prices`` rebuilds
+    ``np.random.default_rng(self.seed)`` on every call, so all repetitions
+    use bit-identical random draws. The MC price column is therefore the
+    same value ``n_runs`` times.
     """
     rows = []
     for label, tau, n_steps_mc in scenarios:
-        # ── Warmup (discarded) ──
-        model.price_call_llh(S=S0, K=K, tau=tau,
-                             vol=model.sigma0, theta=model.theta0,
-                             phi_max=phi_max, n_phi=n_phi, n_steps_ode=n_steps_ode)
-
         # ── Numerical LLH (median of n_runs) ──
         times_llh = []
         for _ in range(n_runs):
@@ -129,13 +153,6 @@ def llh_vs_mc_timing(model, S0, K, scenarios, n_paths,
             'Time_LLH': t_llh, 'Time_MC': t_mc,
             'Speedup': t_mc / t_llh,
         })
-
-        # print(f"\n── {label} ──")
-        # print(f"{'Method':<20} {'Price':>12} {'Time (s)':>10}")
-        # print(f"{'-'*44}")
-        # print(f"{'Numerical LLH':<20} {p_llh:>12.6f} {t_llh:>10.4f}")
-        # print(f"{'Monte Carlo':<20} {p_mc:>12.6f} {t_mc:>10.4f}")
-        # print(f"{'Speedup':<20} {'':>12} {t_mc/t_llh:>10.1f}x")
 
     return pd.DataFrame(rows)
 

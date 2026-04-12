@@ -115,6 +115,86 @@ def _multiplicative_euler_prices(S0: float, r: float, sigma_hat: np.ndarray, dW1
     return S0 * np.cumprod(increments, axis=1)
 
 
+def _log_euler_prices(S0: float, r: float, sigma_hat: np.ndarray, dW1: np.ndarray, dt: float):
+    """Log-Euler asset update — exact-GBM-step within each interval.
+
+    log(S_{j+1}) = log(S_j) + (r - 0.5*sigma^2)*dt + sigma*dW1
+
+    Eliminates the constant-sigma Itô-correction bias of the multiplicative
+    Euler scheme. The leverage-coupling bias (sigma correlated with dW1
+    across steps via rho) remains. Mathematically equivalent to multiplicative
+    Euler in the limit dt -> 0; differs at O(dt) for finite dt.
+
+    """
+    out = (r - 0.5 * sigma_hat * sigma_hat) * dt + sigma_hat * dW1
+    np.cumsum(out, axis=1, out=out)
+    np.exp(out, out=out)
+    out *= S0
+    return out
+
+
+def _predictor_corrector_prices(S0: float, r: float, sigma_hat: np.ndarray, dW1: np.ndarray, dt: float):
+    """Predictor-corrector asset update using midpoint sigma in the drift only.
+
+    Estimates sigma at the midpoint of each step via the average of adjacent
+    sigma_hat values, uses the midpoint in the *drift* term, and keeps the
+    *diffusion* term anchored at the left-endpoint sigma_hat[j] (preserving
+    Itô convention):
+
+        sigma_mid[:, j] = 0.5 * (sigma_hat[:, j] + sigma_hat[:, j+1])
+        log(S_{j+1})    = log(S_j)
+                          + (r - 0.5 * sigma_mid^2) * dt   # drift: midpoint
+                          +       sigma_hat * dW1          # diffusion: left endpoint
+
+    The last step degrades to log-Euler with sigma_hat[:, -1] (no
+    sigma_hat[:, n] is available).
+
+    Memory footprint: one extra (n_paths, n_steps_mc) array for sigma_mid,
+    matching the size of sigma_hat.
+    """
+    sigma_mid = np.empty_like(sigma_hat)
+    sigma_mid[:, :-1] = 0.5 * (sigma_hat[:, :-1] + sigma_hat[:, 1:])
+    sigma_mid[:, -1] = sigma_hat[:, -1]
+
+    # Drift uses midpoint sigma (Riemann time integral, midpoint rule).
+    # Diffusion uses left-endpoint sigma_hat (Itô convention preserved).
+    out = (r - 0.5 * sigma_mid * sigma_mid) * dt + sigma_hat * dW1
+    np.cumsum(out, axis=1, out=out)
+    np.exp(out, out=out)
+    out *= S0
+    return out
+
+
+def _milstein_prices(S0: float, r: float, sigma_hat: np.ndarray, dW1: np.ndarray,
+                     dW2: np.ndarray, dt: float, nu: float, rho: float):
+    """2D simplified Milstein asset update (Lévy areas dropped).
+
+    Adds the leverage cross-term that captures the leading-order asset bias
+    when sigma is correlated with dW1 via rho — closes the asymptotic floor
+    that log-Euler and predictor-corrector cannot remove for nu*rho != 0.
+
+        log(S_{j+1}) - log(S_j) = (r - 0.5*sigma^2)*dt + sigma*dW1
+                                  + 0.5 * nu * (dW1*dW2 - rho*dt)
+
+    Derivation: expand sigma_t = sigma_j + nu*(W2_t - W2_j) + O(dt) inside
+    the Itô integral ∫_{t_j}^{t_{j+1}} sigma_t dW1; the symmetric part of the
+    iterated Itô integral over (W1, W2) is 0.5*(dW1*dW2 - rho*dt). The
+    antisymmetric (Lévy area) component is dropped — standard simplified
+    Milstein for SV models (Glasserman §6.3, Andersen 2008).
+
+    Reduces to log-Euler exactly when nu = 0. When rho = 0 the cross-term
+    has zero mean but adds a path-wise zero-mean fluctuation independent of
+    dW1, so option prices should still agree with log-Euler within MC SE.
+    """
+    out = ((r - 0.5 * sigma_hat * sigma_hat) * dt
+           + sigma_hat * dW1
+           + (0.5 * nu) * (dW1 * dW2 - rho * dt))
+    np.cumsum(out, axis=1, out=out)
+    np.exp(out, out=out)
+    out *= S0
+    return out
+
+
 # ─── ODE system & quadrature (private) ───────────────────────────────────────
 
 def _trap_weights(n, simplified=False):
@@ -618,7 +698,8 @@ class ImprovedSteinStein:
         S0: float,
         T: float,
         n_steps_mc: int,
-        n_paths: int
+        n_paths: int,
+        scheme: str = 'euler',
     ) -> dict:
         """Simulate LLH price and volatility paths via Euler discretization.
 
@@ -632,45 +713,96 @@ class ImprovedSteinStein:
             Number of Euler time steps.
         n_paths : int
             Number of Monte Carlo paths.
+        scheme : {'euler', 'log-euler', 'predictor-corrector', 'milstein'}, default 'euler'
+            Asset-step discretization. ``'euler'`` is the multiplicative
+            Euler scheme ``S_{j+1} = S_j (1 + r*dt + sigma*dW1)``.
+            ``'log-euler'`` is the exact-GBM-step
+            ``S_{j+1} = S_j exp((r - 0.5*sigma^2)*dt + sigma*dW1)``,
+            which removes the constant-sigma Itô-correction bias of the
+            Euler scheme. Both reduce to the same continuous-time SDE
+            as ``dt -> 0``; the leverage-coupling bias (sigma correlated
+            with dW1 across steps) is identical for both at finite ``dt``.
+            ``'predictor-corrector'`` uses the average of adjacent
+            ``sigma_hat`` values as a midpoint estimate within each step
+            and applies a log-Euler asset update with that midpoint sigma.
+            This captures the leverage coupling at first order in ``dt``,
+            which the other two schemes cannot.
+            ``'milstein'`` adds the 2D Milstein leverage cross-term
+            ``0.5*nu*(dW1*dW2 - rho*dt)`` on top of the log-Euler update,
+            targeting the residual asymptotic bias for ``nu*rho != 0`` (the
+            simplified Milstein form drops the Lévy area component).
 
         Returns
         -------
         dict
             'dt'        : float -- step size T/n_steps_mc
-            'W'         : ndarray (n_paths, n_steps_mc) -- auxiliary BM
             'B'         : ndarray (n_paths, n_steps_mc) -- geometric BM
-            'W2'        : ndarray (n_paths, n_steps_mc) -- volatility-driver BM
             'sigma_hat' : ndarray (n_paths, n_steps_mc) -- instantaneous vol
             'S'         : ndarray (n_paths, n_steps_mc+1) -- prices incl. S0
+
+        Notes
+        -----
+        Intermediate Brownians ``W`` (driver of ``B``) and ``W2`` (driver of
+        ``sigma_hat``) are computed but not returned — no caller in the
+        codebase consumes them. Memory-resident intermediates are released
+        with ``del`` as soon as they have been consumed by the next stage,
+        keeping the function's peak RSS bounded by roughly the four
+        ``(n_paths, n_steps_mc)`` arrays held simultaneously inside
+        ``_sigma_hat_from_components``.
         """
         dt = T / n_steps_mc
         sqrt_dt = np.sqrt(dt)
         rng = np.random.default_rng(self.seed)
 
-        # (i) Brownian for B
+        # (i) Brownian for B — keep only what's needed for B, then free W
         Zb = rng.standard_normal((n_paths, n_steps_mc))
-        dW, W = _brownian_from_normals(Zb, dt)
+        W = np.cumsum(sqrt_dt * Zb, axis=1)        # inline; no dW allocation
+        del Zb
         B = _gbm_from_formula(W, dt)
+        del W                                       # only used to make B
 
-        # (ii) Correlated Brownian motions for price and sigma drivers
+        # (ii) Correlated price/vol Brownians — keep only dW1 and W2
+        # ('milstein' additionally retains dW2 for the leverage cross-term)
         Z1, Z2 = _draw_correlated_normals(rng, n_paths, n_steps_mc, self.rho)
-        # Inline dW1 to avoid discarded cumsum allocation
         dW1 = sqrt_dt * Z1
-        dW2, W2 = _brownian_from_normals(Z2, dt)
+        del Z1                                      # only used to make dW1
+        if scheme == 'milstein':
+            dW2 = sqrt_dt * Z2
+            W2 = np.cumsum(dW2, axis=1)
+        else:
+            W2 = np.cumsum(sqrt_dt * Z2, axis=1)    # inline; no dW2 allocation
+        del Z2
 
-        # (iii) sigma_hat
+        # (iii) sigma_hat — frees W2 once consumed
         sigma_hat = _sigma_hat_from_components(
-            n_steps_mc, dt, self.kappa, self.sigma0, self.theta0, self.lam, self.nu, self.eta, W2, B
+            n_steps_mc, dt, self.kappa, self.sigma0, self.theta0,
+            self.lam, self.nu, self.eta, W2, B,
         )
+        del W2                                      # only used to make sigma_hat
 
-        # (iv) prices — avoid S0 column concatenation
-        S = _multiplicative_euler_prices(S0, self.r, sigma_hat, dW1, dt)
+        # (iv) prices — dispatch on scheme, keep S_full only
+        if scheme == 'euler':
+            S = _multiplicative_euler_prices(S0, self.r, sigma_hat, dW1, dt)
+        elif scheme == 'log-euler':
+            S = _log_euler_prices(S0, self.r, sigma_hat, dW1, dt)
+        elif scheme == 'predictor-corrector':
+            S = _predictor_corrector_prices(S0, self.r, sigma_hat, dW1, dt)
+        elif scheme == 'milstein':
+            S = _milstein_prices(S0, self.r, sigma_hat, dW1, dW2, dt,
+                                 self.nu, self.rho)
+            del dW2
+        else:
+            raise ValueError(
+                f"unknown scheme {scheme!r}; expected 'euler', 'log-euler', "
+                f"'predictor-corrector' or 'milstein'"
+            )
+        del dW1
         S_full = np.empty((S.shape[0], S.shape[1] + 1), dtype=float)
         S_full[:, 0] = S0
         S_full[:, 1:] = S
+        del S
 
-        return {"dt": dt, "W": W, "B": B, "W2": W2, "sigma_hat": sigma_hat,
-                "S": S_full}
+        return {"dt": dt, "B": B, "sigma_hat": sigma_hat, "S": S_full}
 
 
     def llh_precompute_tau(self, tau, phi_max, n_phi, n_steps_ode, eps0=1e-6) -> LLHPrecompute:

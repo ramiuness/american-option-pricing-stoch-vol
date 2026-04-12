@@ -192,21 +192,46 @@ def _compute_mc_llh_grid(model,
                          S0_values=(90.0, 95.0, 100.0, 105.0, 110.0),
                          K_values=(80.0, 100.0, 120.0),
                          tau=TAU, n_steps_mc=52, n_paths=10_000,
-                         phi_max=300.0, n_phi=513, n_steps_ode=128):
-    """Compute LLH formula and MC call prices over an (S0, K) grid."""
+                         phi_max=300.0, n_phi=513, n_steps_ode=128,
+                         scheme='euler'):
+    """Compute LLH formula and MC call prices over an (S0, K) grid.
+
+    A single Monte Carlo simulation anchored at S0=1 is broadcast across all
+    (S0, K) cells via the multiplicative structure of the LLH price SDE
+    (S_t = S0 * prod(1 + r*dt + sigma_hat*dW1)). All cells share the same
+    random draws — the bias panel therefore isolates the LLH-vs-MC
+    discretisation gap from cross-spot sampling noise, and high-MC-count
+    regenerations cost one path block per tau instead of len(S0_values).
+
+    The ``scheme`` argument forwards to ``model.simulate_prices`` to select
+    the asset-step discretization (``'euler'`` default, ``'log-euler'`` opt-in).
+    """
     pre = model.llh_precompute_tau(tau, phi_max, n_phi, n_steps_ode)
+
+    sim = model.simulate_prices(S0=1.0, T=tau,
+                                n_steps_mc=n_steps_mc, n_paths=n_paths,
+                                scheme=scheme)
+    M_T = sim['S'][:, -1]                                    # (n_paths,)
+
+    S0_arr = np.asarray(S0_values, dtype=float)
+    K_arr = np.asarray(K_values, dtype=float)
+    ST = S0_arr[:, None, None] * M_T[None, None, :]
+    Y = np.exp(-model.r * tau) * np.maximum(ST - K_arr[None, :, None], 0.0)
+    mc_price = Y.mean(axis=-1)                               # (n_S, n_K)
+    mc_se = Y.std(axis=-1, ddof=1) / np.sqrt(n_paths)        # (n_S, n_K)
+
     results = {}
-    for S0 in S0_values:
-        res = model.simulate_prices(S0=S0, T=tau, n_steps_mc=n_steps_mc, n_paths=n_paths)
-        for K in K_values:
+    for i, S0 in enumerate(S0_values):
+        for j, K in enumerate(K_values):
             llh_p = model.price_call_llh(
-                S=S0, K=K, tau=tau, vol=model.sigma0, theta=model.theta0, pre=pre
+                S=S0, K=K, tau=tau, vol=model.sigma0,
+                theta=model.theta0, pre=pre
             ).item()
-            mc_res = pm.price_call_mc(res['S'], K=K, T=tau, r=model.r)
+            p, se = float(mc_price[i, j]), float(mc_se[i, j])
             results[(S0, K)] = {
                 'llh': llh_p,
-                'mc': mc_res['price'],
-                'mc_ci': mc_res['ci_95'],
+                'mc': p,
+                'mc_ci': (p - 1.96 * se, p + 1.96 * se),
             }
     return results
 

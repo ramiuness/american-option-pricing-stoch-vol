@@ -12,6 +12,7 @@ Diagnostic and validation scripts for the LLH pricing implementation.
 | `diagnostic_fast.py` | Quick diagnostic for European pricing accuracy and arbitrage checks |
 | `diagnose_bias.py` | Investigates European pricing bias across maturities |
 | `analyze_indexing.py` | Demonstrates that `sigma_hat[:, j]` drives S[:,j] -> S[:,j+1] |
+| `sweep_t2_discretization_bias.py` | Multi-seed sweep over `n_steps_mc` for T2 params; fits `bias(dt) ≈ a + b·dt` to extract the asymptotic floor (the part of the LLH-vs-MC bias that scheme changes need to address) |
 
 ## Usage
 

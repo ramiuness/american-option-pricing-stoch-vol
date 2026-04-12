@@ -61,13 +61,10 @@ notebooks/
   stylized_facts.ipynb                # Parameter impact on return distributions
 
 reports/
-  llh-formula.pdf             # Theoretical derivation of the European price formula
   llh-formula-report.pdf      # Extended report with European pricing results
   pricing-project.pdf         # Project report
   american_pricing_report.tex # American pricing report (LSM + CV results, VR, EEP)
   american_pricing_report.pdf # Compiled American pricing report
-  difficulties_report.tex     # Numerical difficulties analysis (T2 parameter regime)
-  difficulties_report.pdf     # Compiled difficulties report
 ```
 
 ---
