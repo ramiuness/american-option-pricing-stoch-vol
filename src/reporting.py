@@ -216,7 +216,7 @@ def _model_attrs(model):
 
 def american_put_comparison(model, K, S0_grid, moneyness_labels, T, n_steps_mc,
                             n_paths, n_paths_llh=None, llh_params=None,
-                            include_llh=True, seed=42):
+                            include_llh=True, seed=42, scheme='euler'):
     """
     Price American puts across moneyness levels.
 
@@ -233,7 +233,7 @@ def american_put_comparison(model, K, S0_grid, moneyness_labels, T, n_steps_mc,
 
         # --- Simulation ---
         m = pm.ImprovedSteinStein(**_model_attrs(model), seed=seed)
-        sim = m.simulate_prices(S0=s0, T=T, n_steps_mc=n_steps_mc, n_paths=n_paths)
+        sim = m.simulate_prices(S0=s0, T=T, n_steps_mc=n_steps_mc, n_paths=n_paths, scheme=scheme)
 
         # MC European put
         res_mc_put = m.price_put_mc(sim, K=K)
@@ -249,7 +249,7 @@ def american_put_comparison(model, K, S0_grid, moneyness_labels, T, n_steps_mc,
         if include_llh:
             # --- Separate simulation for CV-LLH (n_paths_llh) ---
             m2 = pm.ImprovedSteinStein(**_model_attrs(model), seed=seed)
-            sim_llh = m2.simulate_prices(S0=s0, T=T, n_steps_mc=n_steps_mc, n_paths=n_paths_llh)
+            sim_llh = m2.simulate_prices(S0=s0, T=T, n_steps_mc=n_steps_mc, n_paths=n_paths_llh, scheme=scheme)
 
             # CV-LLH
             res_llh = m2.price_american_put(sim_llh, K=K, use_cv=True, euro_method='llh',
@@ -488,7 +488,7 @@ def plot_eep_table(eep_df):
 
 
 def build_timing_table(model, K, S0, horizons, n_paths, n_paths_llh,
-                       llh_params, seed=42):
+                       llh_params, seed=42, scheme='euler'):
     """
     Time the three pricing methods across horizons.
 
@@ -510,7 +510,7 @@ def build_timing_table(model, K, S0, horizons, n_paths, n_paths_llh,
         m = pm.ImprovedSteinStein(**_model_attrs(model), seed=seed)
 
         # Simulation for plain LSM
-        sim = m.simulate_prices(S0=S0, T=T, n_steps_mc=n_steps, n_paths=n_paths)
+        sim = m.simulate_prices(S0=S0, T=T, n_steps_mc=n_steps, n_paths=n_paths, scheme=scheme)
 
         # Plain LSM
         t0 = time.perf_counter()
@@ -518,7 +518,7 @@ def build_timing_table(model, K, S0, horizons, n_paths, n_paths_llh,
         t_plain = time.perf_counter() - t0
 
         # CV-LLH
-        sim_llh = m.simulate_prices(S0=S0, T=T, n_steps_mc=n_steps, n_paths=n_paths_llh)
+        sim_llh = m.simulate_prices(S0=S0, T=T, n_steps_mc=n_steps, n_paths=n_paths_llh, scheme=scheme)
         t0 = time.perf_counter()
         res_l = m.price_american_put(sim_llh, K=K, use_cv=True, euro_method='llh',
                                      ridge=1e-5, **llh_params)
