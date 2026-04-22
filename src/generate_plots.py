@@ -1264,6 +1264,16 @@ def _run_param_set(pset_name):
         print(f"  Plot 5: American put panels ({hlbl})...")
         plot_american_put_panels(pset_name, label, hkey)
 
+    # Report-only additions (T1 only)
+    if pset_name == 'T1':
+        print("  Plot 5-floors: American put panels with floor variants (1-year)...")
+        plot_american_put_panels_floors(pset_name, label, '1y')
+        gc.collect()
+
+        print("  Plot fig_estimator_scatter: estimator scatter at S0=100...")
+        plot_estimator_scatter(pset_name, label)
+        gc.collect()
+
     # Dual basis: Laguerre and Gaussian fig6
     am_grid_laguerre = None
     for btype, border, ridge, blabel in [BASIS_LAGUERRE, BASIS_GAUSSIAN]:
@@ -1289,6 +1299,11 @@ def _run_param_set(pset_name):
 
     del am_grid_laguerre
     gc.collect()
+
+    if pset_name == 'T1':
+        print("  Plot 7: VR comparison CV-LLH vs CV-MC1...")
+        plot_vr_mc1_comparison(pset_name, label)
+        gc.collect()
 
     print("  Plot 10: MC path convergence (price + EEP)...")
     plot_mc_path_convergence(pset_name, label)

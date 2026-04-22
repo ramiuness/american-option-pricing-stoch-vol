@@ -119,6 +119,38 @@ print(f"Price: {result['price_imp']:.4f}, SE: {result['std_err_imp']:.4f}")
 
 ---
 
+## Regenerating report figures
+
+The code-produced figures used in the LaTeX report are rebuilt by a single
+Python orchestration script. From the project root:
+
+```bash
+python scripts/regen_report_figs.py --out-dir /path/to/your/report/figs
+```
+
+The script runs `src/generate_plots.py` (T1 and T2 parameter sets) and
+`src/timing_analysis.py` in-process, then copies the 20 report-relevant
+PNGs from `figs/` into `--out-dir`. Pipeline parameters (spots, horizons,
+ridge, basis_vars, seeds) live as module-level constants in the two
+source files — no separate config file.
+
+Useful flags:
+
+- `--list-only` — print the filenames the script will copy and exit.
+- `--param-sets T1` — run only the T1 parameter set (most of the report's
+  American-pricing figures live under T1).
+- `--skip-plots` / `--skip-timing` — rerun only one pipeline.
+
+Runtime: ~30 min for `generate_plots`, ~5–8 min for `timing_analysis`.
+
+**Figures the script does NOT regenerate** (static or authored outside
+the codebase — keep them as-is in your report directory):
+
+- `udem_logo.png`
+- `fig_paths_table1.png`, `fig_paths_table2.png`
+
+---
+
 ## Dependencies
 
 - Python 3.9+
