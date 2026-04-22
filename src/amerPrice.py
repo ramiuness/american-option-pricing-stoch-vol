@@ -42,7 +42,99 @@ def _compute_rbf_params(x_itm, n_centers):
     spacings = np.diff(centers)
     pos = spacings[spacings > 0]
     bandwidth = np.median(pos) if len(pos) > 0 else np.ptp(x_itm)
-    return centers, max(bandwidth, 0.01 * np.ptp(x_itm))
+    return centers, max(bandwidth, 0.01 * np.ptp(x_itm), 1e-8)
+
+
+_VALID_BASIS_VARS = ('S', 'sigma', 'theta')
+
+
+def _build_design_matrix(Sj, volj, thetaj, K, itm,
+                         basis_type, basis_order, basis_vars=('S',)):
+    """Additive multivariate regression basis over (S/K, sigma, theta).
+
+    Concatenates one univariate block per entry of ``basis_vars``. When
+    ``len(basis_vars) == 1`` the helper emits exactly the matrix produced
+    by the single-variable inline code path (bitwise back-compat).
+
+    Multi-block Laguerre drops the duplicate ``L_0 = 1`` column of every
+    block after the first (first block keeps all ``basis_order+1``
+    columns; subsequent blocks keep only ``L_1..L_order``). Sigma and
+    theta are standardized per step against their ITM-sample mean/std so
+    Laguerre sees O(1) inputs. Gaussian RBF has no constant column, so
+    no dedup is applied; each block gets its own ITM-fit centres and
+    bandwidth in the variable's native scale.
+
+    Parameters
+    ----------
+    Sj, volj : ndarray, (n_paths,)
+        Spot and instantaneous vol at node j.
+    thetaj   : ndarray or None, (n_paths,)
+        Long-run vol at node j. Required iff 'theta' in basis_vars.
+    K        : float, strike.
+    itm      : ndarray, (n_paths,) bool
+        In-the-money mask at node j; drives centre/bandwidth fitting
+        (RBF) and standardization stats (Laguerre).
+    basis_type : {'laguerre', 'gaussian'}.
+    basis_order : int.
+    basis_vars : tuple of str, subset of ('S', 'sigma', 'theta').
+
+    Returns
+    -------
+    Phi_all : ndarray, (n_paths, p)
+        Horizontal concatenation of per-variable blocks.
+    """
+    if len(basis_vars) == 0:
+        raise ValueError("basis_vars must contain at least one state variable")
+    for v in basis_vars:
+        if v not in _VALID_BASIS_VARS:
+            raise ValueError(f"Unknown basis var: '{v}'")
+    if 'theta' in basis_vars and thetaj is None:
+        raise ValueError("'theta' in basis_vars but thetaj is None")
+
+    n_paths = Sj.shape[0]
+    if not itm.any():
+        return np.ones((n_paths, 1), dtype=float)
+
+    single_block = (len(basis_vars) == 1)
+
+    def _raw_input(var):
+        if var == 'S':
+            return Sj / K
+        if var == 'sigma':
+            return volj
+        return thetaj
+
+    def _lag_input(var, raw):
+        # S/K is already O(1); sigma & theta get per-step standardization
+        # against ITM stats so lagvander sees O(1) inputs.
+        if var == 'S' or single_block:
+            return raw
+        mu = float(raw[itm].mean())
+        sd = float(raw[itm].std())
+        if sd < 1e-8:
+            sd = 1.0
+        return (raw - mu) / sd
+
+    if basis_type == 'laguerre':
+        blocks = []
+        for i, var in enumerate(basis_vars):
+            x = _lag_input(var, _raw_input(var))
+            block = lagvander(np.asarray(x, dtype=float), basis_order)
+            if (not single_block) and i > 0:
+                block = block[:, 1:]  # drop L_0 duplicate
+            blocks.append(block)
+        return blocks[0] if single_block else np.hstack(blocks)
+
+    if basis_type == 'gaussian':
+        blocks = []
+        for var in basis_vars:
+            x = _raw_input(var)
+            x_itm_vals = x[itm]
+            centers, bw = _compute_rbf_params(x_itm_vals, basis_order)
+            blocks.append(_gaussian_rbf_basis(x, centers, bw))
+        return blocks[0] if single_block else np.hstack(blocks)
+
+    raise ValueError(f"Unknown basis_type: '{basis_type}'")
 
 
 _RIDGE_EPS = 1e-12
@@ -95,15 +187,6 @@ def _ols_fit_predict_multi(Phi, Y_mat, Phi_all, ridge=0.0):
     except np.linalg.LinAlgError:
         Beta, *_ = np.linalg.lstsq(A + reg * np.eye(n_features), B_rhs, rcond=None)
     return Phi_all @ Beta
-
-
-def _theta_lr_grid(B, theta0, lam, eta, dt, n_steps, n_paths):
-    """Long-run mean theta_t on the simulation grid. Returns (n_paths, n_steps+1)."""
-    theta = np.empty((n_paths, n_steps + 1), dtype=float)
-    theta[:, 0] = float(theta0)
-    t_index = np.arange(1, n_steps + 1, dtype=float) * dt
-    theta[:, 1:] = theta0 + lam * t_index[None, :] + eta * (B - 1.0)
-    return theta
 
 
 # ========================= European PUT providers ==========================
@@ -209,17 +292,13 @@ def precompute_european(model, sim_out, K,
     """
     S = sim_out['S']
     sigma_hat = sim_out['sigma_hat']
-    B = sim_out['B']
+    theta_lr = sim_out['theta']
     dt = float(sim_out['dt'])
 
     n_paths, n_cols = S.shape
     n_steps = n_cols - 1
 
-    # 1. Long-run mean grid
-    theta_lr = _theta_lr_grid(B, model.theta0, model.lam, model.eta,
-                              dt, n_steps, n_paths)
-
-    # 2. ODE coefficients for each unique remaining maturity
+    # 1. ODE coefficients for each unique remaining maturity
     tau_cache = {}
     for j in range(1, n_steps):
         steps_remaining = n_steps - j
@@ -229,7 +308,7 @@ def precompute_european(model, sim_out, K,
                 n_steps_ode=n_steps_rk4, eps0=eps0
             )
 
-    # 3. European put prices at each exercise date
+    # 2. European put prices at each exercise date
     euro_grid = {}
     for j in range(n_steps - 1, 0, -1):
         Sj = S[:, j]
@@ -261,7 +340,8 @@ def precompute_european(model, sim_out, K,
 # ===================== LSM pricer internals ================================
 
 def _setup(model, sim_out, K, use_cv, euro_method, floor_method,
-           phi_max, n_phi, n_steps_rk4, eps0, precomputed=None):
+           phi_max, n_phi, n_steps_rk4, eps0, precomputed=None,
+           basis_needs_theta=False):
     """Initialize LSM state: arrays, theta grid, maturity payoffs, and ODE cache.
 
     When precomputed is provided, tau_cache and theta_lr are taken from it,
@@ -275,7 +355,6 @@ def _setup(model, sim_out, K, use_cv, euro_method, floor_method,
     """
     S = sim_out['S']
     sigma_hat = sim_out['sigma_hat']
-    B = sim_out['B']
     dt = float(sim_out['dt'])
     r = float(model.r)
 
@@ -287,10 +366,14 @@ def _setup(model, sim_out, K, use_cv, euro_method, floor_method,
         theta_lr = precomputed.theta_lr
         tau_cache = precomputed.tau_cache
     else:
-        # Step 1: theta_t grid (needed when LLH is used for CV or floor)
-        need_theta = (use_cv and euro_method == 'llh') or (not use_cv and floor_method == 'llh')
-        theta_lr = _theta_lr_grid(B, model.theta0, model.lam, model.eta,
-                                  dt, n_steps, n_paths) if need_theta else None
+        # Step 1: theta_t grid (needed when LLH is used for CV or floor,
+        # or when θ appears in the regression basis)
+        need_theta = (
+            (use_cv and euro_method == 'llh')
+            or (not use_cv and floor_method == 'llh')
+            or basis_needs_theta
+        )
+        theta_lr = sim_out['theta'] if need_theta else None
 
         # Precompute ODE coefficients for all unique remaining maturities
         tau_cache = {}
@@ -319,7 +402,7 @@ def _setup(model, sim_out, K, use_cv, euro_method, floor_method,
 
 def _backward_loop(state, model, sim_out, K, use_cv,
                    basis_type, basis_order, ridge, euro_method, floor_method,
-                   precomputed=None):
+                   basis_vars=('S',), precomputed=None):
     """Backward induction from j = N-1 to j = 1.
 
     At each exercise date, fits continuation-value regressions, computes
@@ -371,16 +454,12 @@ def _backward_loop(state, model, sim_out, K, use_cv,
         Ij = _Ij
         itm = (Ij > 0.0)
 
-        # Basis on x = S/K
-        np.divide(Sj, K, out=_x)
-        if basis_type == 'laguerre':
-            Phi_all = _laguerre_basis(_x, order=basis_order)
-        elif basis_type == 'gaussian':
-            x_itm_vals = _x[itm] if itm.any() else _x
-            centers, bw = _compute_rbf_params(x_itm_vals, basis_order)
-            Phi_all = _gaussian_rbf_basis(_x, centers, bw)
-        else:
-            raise ValueError(f"Unknown basis_type: '{basis_type}'")
+        # Regression basis over selected state variables (additive concat).
+        Phi_all = _build_design_matrix(
+            Sj, volj, thetaj, K, itm,
+            basis_type=basis_type, basis_order=basis_order,
+            basis_vars=basis_vars,
+        )
 
         if use_cv:
             # Step 3(ii): European PUT E_j
@@ -570,7 +649,7 @@ def price_american_put_lsm_llh(model, sim_out, K, basis_order=None,
                                use_cv=True, improved=True, ridge=1e-5,
                                euro_method='llh', floor_method='llh',
                                phi_max=300.0, n_phi=513, n_steps_rk4=256, eps0=1e-6,
-                               precomputed=None):
+                               basis_vars=('S',), precomputed=None):
     """
     LSM American put pricer with optional Rasmussen control variates.
 
@@ -586,6 +665,10 @@ def price_american_put_lsm_llh(model, sim_out, K, basis_order=None,
     floor_method : 'bs' | 'llh' — European floor for exercise safety when use_cv=False.
                    Default 'bs' is fast; 'llh' is accurate but ~100x slower.
     phi_max, n_phi, n_steps_rk4, eps0 : LLH quadrature params (only when euro_method='llh')
+    basis_vars   : tuple, subset of ('S','sigma','theta'). Default ('S',)
+                   matches the original spot-only basis bitwise. Multi-block
+                   Laguerre drops duplicate L_0 columns; sigma and theta are
+                   standardized per step against their ITM sample mean/std.
     precomputed  : PrecomputedEuropean or None — shared European grid from
                    precompute_european(). Skips ODE and European pricing when provided.
 
@@ -616,12 +699,17 @@ def price_american_put_lsm_llh(model, sim_out, K, basis_order=None,
     if basis_order is None:
         basis_order = 5 if basis_type == 'gaussian' else 2
 
+    basis_vars = tuple(basis_vars)
+    basis_needs_theta = ('theta' in basis_vars)
+
     state = _setup(model, sim_out, K, use_cv, euro_method, floor_method,
-                   phi_max, n_phi, n_steps_rk4, eps0, precomputed=precomputed)
+                   phi_max, n_phi, n_steps_rk4, eps0, precomputed=precomputed,
+                   basis_needs_theta=basis_needs_theta)
 
     CF_1, CV_1 = _backward_loop(state, model, sim_out, K, use_cv,
                                  basis_type, basis_order, ridge,
                                  euro_method, floor_method,
+                                 basis_vars=basis_vars,
                                  precomputed=precomputed)
 
     out = _base_estimator(state, CF_1, K)

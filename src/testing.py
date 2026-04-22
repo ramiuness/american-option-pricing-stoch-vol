@@ -1,6 +1,9 @@
 """
 Testing and comparison utilities for regression basis and CI experiments.
 
+Accepts an optional ``basis_vars`` element in the config tuples so callers
+can sweep the multivariate basis alongside the univariate one.
+
 Used by notebooks/regression_basis_comparison.ipynb and notebooks/ci_comparison.ipynb.
 """
 
@@ -11,6 +14,37 @@ import matplotlib.pyplot as plt
 
 import priceModels as pm
 import amerPrice as ap
+
+
+# ─── Config-tuple helpers ──────────────────────────────────────────────
+
+def _unpack_basis_cfg(cfg):
+    """Accept 4-tuple (name, btype, border, ridge) or 5-tuple with basis_vars.
+
+    Returns (name, basis_type, basis_order, ridge, basis_vars). Default
+    ``basis_vars=('S',)`` preserves the pre-v1 behavior.
+    """
+    if len(cfg) == 4:
+        name, btype, border, ridge = cfg
+        return name, btype, border, ridge, ('S',)
+    if len(cfg) == 5:
+        name, btype, border, ridge, basis_vars = cfg
+        return name, btype, border, ridge, tuple(basis_vars)
+    raise ValueError(f"basis config must be 4- or 5-tuple, got length {len(cfg)}")
+
+
+def _unpack_bias_cfg(cfg):
+    """Accept 5-tuple (name, btype, border, ridge, use_cv) or 6-tuple with basis_vars.
+
+    Returns (name, basis_type, basis_order, ridge, use_cv, basis_vars).
+    """
+    if len(cfg) == 5:
+        name, btype, border, ridge, use_cv = cfg
+        return name, btype, border, ridge, use_cv, ('S',)
+    if len(cfg) == 6:
+        name, btype, border, ridge, use_cv, basis_vars = cfg
+        return name, btype, border, ridge, use_cv, tuple(basis_vars)
+    raise ValueError(f"bias config must be 5- or 6-tuple, got length {len(cfg)}")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -25,8 +59,10 @@ def basis_comparison_grid(params, K, S0_grid, moneyness_labels,
 
     Parameters
     ----------
-    params      : dict of model parameters (r, kappa, nu, ...)
-    configs     : list of (name, basis_type, basis_order, ridge) tuples
+    params   : dict of model parameters (r, kappa, nu, ...)
+    configs  : list of (name, basis_type, basis_order, ridge) or
+               (name, basis_type, basis_order, ridge, basis_vars) tuples.
+               When ``basis_vars`` is omitted it defaults to ('S',).
 
     Returns
     -------
@@ -38,11 +74,13 @@ def basis_comparison_grid(params, K, S0_grid, moneyness_labels,
         sim = model.simulate_prices(S0=S0, T=T, n_steps_mc=n_steps_mc, n_paths=n_paths)
 
         row = {'S0': S0, 'Moneyness': mlabel}
-        for name, btype, border, ridge in configs:
+        for cfg in configs:
+            name, btype, border, ridge, basis_vars = _unpack_basis_cfg(cfg)
+
             t0 = time.perf_counter()
             res_p = ap.price_american_put_lsm_llh(
                 model, sim, K, basis_order=border, basis_type=btype,
-                use_cv=False, ridge=ridge)
+                use_cv=False, ridge=ridge, basis_vars=basis_vars)
             row[f'{name}_plain_time'] = time.perf_counter() - t0
             row[f'{name}_plain_price'] = res_p['price']
             row[f'{name}_plain_se'] = res_p['std_err']
@@ -50,7 +88,8 @@ def basis_comparison_grid(params, K, S0_grid, moneyness_labels,
             t0 = time.perf_counter()
             res_cv = ap.price_american_put_lsm_llh(
                 model, sim, K, basis_order=border, basis_type=btype,
-                use_cv=True, euro_method='llh', ridge=ridge, **llh_params)
+                use_cv=True, euro_method='llh', ridge=ridge,
+                basis_vars=basis_vars, **llh_params)
             row[f'{name}_cv_time'] = time.perf_counter() - t0
             row[f'{name}_cv_price'] = res_cv.get('price_imp', res_cv['price'])
             row[f'{name}_cv_se'] = res_cv.get('std_err_imp', res_cv['std_err'])
@@ -63,9 +102,15 @@ def basis_comparison_grid(params, K, S0_grid, moneyness_labels,
 
 
 def basis_sensitivity(params, S0, K, T, n_steps_mc, n_paths, seed,
-                      llh_params, orders, ridge=1e-4):
+                      llh_params, orders, ridge=1e-4,
+                      basis_vars=('S',)):
     """
     Sweep Gaussian basis_order at fixed S0. Also computes Laguerre baseline.
+
+    Parameters
+    ----------
+    basis_vars : tuple, subset of ('S','sigma','theta'). Forwarded to both
+                 Gaussian and Laguerre runs.
 
     Returns
     -------
@@ -75,16 +120,18 @@ def basis_sensitivity(params, S0, K, T, n_steps_mc, n_paths, seed,
     sim = model.simulate_prices(S0=S0, T=T, n_steps_mc=n_steps_mc, n_paths=n_paths)
 
     lag_plain = ap.price_american_put_lsm_llh(model, sim, K, basis_type='laguerre',
-        basis_order=3, use_cv=False, ridge=1e-5)
+        basis_order=3, use_cv=False, ridge=1e-5, basis_vars=basis_vars)
     lag_cv = ap.price_american_put_lsm_llh(model, sim, K, basis_type='laguerre',
-        basis_order=3, use_cv=True, euro_method='llh', ridge=1e-5, **llh_params)
+        basis_order=3, use_cv=True, euro_method='llh', ridge=1e-5,
+        basis_vars=basis_vars, **llh_params)
 
     sens_rows = []
     for m in orders:
         res_p = ap.price_american_put_lsm_llh(model, sim, K, basis_type='gaussian',
-            basis_order=m, use_cv=False, ridge=ridge)
+            basis_order=m, use_cv=False, ridge=ridge, basis_vars=basis_vars)
         res_cv = ap.price_american_put_lsm_llh(model, sim, K, basis_type='gaussian',
-            basis_order=m, use_cv=True, euro_method='llh', ridge=ridge, **llh_params)
+            basis_order=m, use_cv=True, euro_method='llh', ridge=ridge,
+            basis_vars=basis_vars, **llh_params)
         sens_rows.append({
             'M': m,
             'Plain price': res_p['price'],
@@ -133,7 +180,6 @@ def plot_basis_comparison(df, moneyness_labels, title_suffix=''):
     s0 = df['S0'].values
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
-    # Panel 1: Plain LSM prices
     ax = axes[0]
     ax.errorbar(s0, df['Laguerre_plain_price'], yerr=1.96*df['Laguerre_plain_se'],
                 fmt='o-', color='#1f77b4', capsize=4, label='Laguerre')
@@ -144,7 +190,6 @@ def plot_basis_comparison(df, moneyness_labels, title_suffix=''):
     ax.set_title('Plain LSM')
     ax.legend(fontsize=9)
 
-    # Panel 2: CV-LLH prices
     ax = axes[1]
     ax.errorbar(s0, df['Laguerre_cv_price'], yerr=1.96*df['Laguerre_cv_se'],
                 fmt='o-', color='#1f77b4', capsize=4, label='Laguerre')
@@ -155,7 +200,6 @@ def plot_basis_comparison(df, moneyness_labels, title_suffix=''):
     ax.set_title('CV-LLH')
     ax.legend(fontsize=9)
 
-    # Panel 3: VR ratios
     ax = axes[2]
     x = np.arange(len(moneyness_labels))
     bar_w = 0.35
@@ -271,12 +315,10 @@ def plot_basis_table(dfs, labels):
 
     for ax, df, lbl in zip(axes, dfs, labels):
         s0 = df['S0'].values
-        # Plain (dotted)
         ax.plot(s0, df['Laguerre_plain_price'], 's:', color='#1f77b4',
                 alpha=0.5, label='Laguerre Plain')
         ax.plot(s0, df['Gaussian_plain_price'], 'D:', color='#d62728',
                 alpha=0.5, label='Gaussian Plain')
-        # CV-LLH (solid)
         ax.plot(s0, df['Laguerre_cv_price'], 'o-', color='#1f77b4',
                 label='Laguerre CV-LLH')
         ax.plot(s0, df['Gaussian_cv_price'], '^-', color='#d62728',
@@ -293,11 +335,17 @@ def plot_basis_table(dfs, labels):
 
 def run_multi_basis(params, S0, K, T, n_steps_mc, N_paths, R,
                     basis_type, basis_order, ridge, use_cv,
-                    llh_params=None, base_seed=1000):
+                    llh_params=None, base_seed=1000,
+                    basis_vars=('S',)):
     """
     Run R independent replications with a specific basis configuration.
 
     Always uses CV-LLH when use_cv=True (for comparing bases with/without CV).
+
+    Parameters
+    ----------
+    basis_vars : tuple, subset of ('S','sigma','theta'). Default ('S',)
+                 preserves pre-v1 behavior.
 
     Returns
     -------
@@ -311,6 +359,7 @@ def run_multi_basis(params, S0, K, T, n_steps_mc, N_paths, R,
         res = ap.price_american_put_lsm_llh(
             model, sim, K,
             basis_type=basis_type, basis_order=basis_order, ridge=ridge,
+            basis_vars=basis_vars,
             use_cv=use_cv, euro_method='llh' if use_cv else 'bs',
             **(kw if use_cv else {}))
         if use_cv:
@@ -333,31 +382,35 @@ def bias_convergence(params, S0, K, T, n_steps_mc, seed,
 
     Parameters
     ----------
-    configs : list of (display_name, basis_type, basis_order, ridge, use_cv) tuples.
-              E.g.:
-                ('Laguerre Plain',   'laguerre', 3,  1e-5, False)
-                ('Laguerre CV-LLH',  'laguerre', 3,  1e-5, True)
-                ('Gaussian Plain',   'gaussian', 15, 1e-4, False)
-                ('Gaussian CV-LLH',  'gaussian', 15, 1e-4, True)
+    configs : list of tuples. Either 5-tuple
+              (display_name, basis_type, basis_order, ridge, use_cv) or 6-tuple
+              (display_name, basis_type, basis_order, ridge, use_cv, basis_vars).
+              When basis_vars is omitted it defaults to ('S',). E.g.:
+                ('Lag Plain Sσθ',  'laguerre', 3,  1e-3, False, ('S','sigma','theta'))
+                ('Lag CV Sσθ',     'laguerre', 3,  1e-3, True,  ('S','sigma','theta'))
+                ('Gau Plain',      'gaussian', 15, 1e-4, False)
+                ('Gau CV',         'gaussian', 15, 1e-4, True)
 
     Returns
     -------
     (bias_df, ref_prices) where ref_prices is {config_name: reference_price}
     """
     all_data = {}
-    for name, btype, border, ridge, use_cv in configs:
+    for cfg in configs:
+        name, btype, border, ridge, use_cv, basis_vars = _unpack_bias_cfg(cfg)
         all_data[name] = {}
         for N in N_values:
             prices, ses = run_multi_basis(
                 params, S0, K, T, n_steps_mc, N, R,
                 basis_type=btype, basis_order=border, ridge=ridge,
-                use_cv=use_cv, llh_params=llh_params)
+                use_cv=use_cv, llh_params=llh_params,
+                basis_vars=basis_vars)
             all_data[name][N] = {
                 'mean': prices.mean(),
                 'se_multi': prices.std(ddof=1) / np.sqrt(R),
                 'se_single_mean': ses.mean(),
             }
-            print(f"  {name:22s} N={N:>7}: mean={prices.mean():.4f}")
+            print(f"  {name:30s} N={N:>7}: mean={prices.mean():.4f}")
 
     N_ref = max(N_values)
     ref_prices = {name: all_data[name][N_ref]['mean'] for name in all_data}
@@ -393,7 +446,6 @@ def plot_bias_convergence(bias_df, ref_prices, S0, K):
     S0, K      : float — spot and strike for the figure title
     """
     configs = bias_df['Config'].unique()
-    # Colors by basis, linestyle by CV status
     style_map = {
         'Laguerre Plain':  ('#1f77b4', 'o', '--'),
         'Laguerre CV-LLH': ('#1f77b4', 'o', '-'),
@@ -450,22 +502,28 @@ def ci_comparison_grid(params, K, T, n_steps_mc, S0_cases,
     approximately 1 if the single-run CLT approximation is adequate.
 
     The CI of the *mean* of R runs is computed from SE_mean = SD_empirical/sqrt(R).
+
+    Parameters
+    ----------
+    configs : list of 5- or 6-tuples; see ``bias_convergence`` for the schema.
     """
     from scipy.stats import t as t_dist
 
     rows = []
     for S0, mlabel in S0_cases:
         for N in N_values:
-            for name, btype, border, ridge, use_cv in configs:
+            for cfg in configs:
+                name, btype, border, ridge, use_cv, basis_vars = _unpack_bias_cfg(cfg)
                 print(f"  {mlabel} N={N:>6} {name}...", end=' ')
                 prices, ses = run_multi_basis(
                     params, S0, K, T, n_steps_mc, N, R,
                     basis_type=btype, basis_order=border, ridge=ridge,
-                    use_cv=use_cv, llh_params=llh_params)
+                    use_cv=use_cv, llh_params=llh_params,
+                    basis_vars=basis_vars)
 
-                sd_empirical = prices.std(ddof=1)         # empirical per-run SD
-                se_mean = sd_empirical / np.sqrt(R)       # SE of the mean
-                se_single_mean = ses.mean()               # mean of per-run CLT SEs
+                sd_empirical = prices.std(ddof=1)
+                se_mean = sd_empirical / np.sqrt(R)
+                se_single_mean = ses.mean()
                 ratio = sd_empirical / se_single_mean if se_single_mean > 0 else np.nan
 
                 t_crit = t_dist.ppf(0.975, df=R-1)
@@ -525,7 +583,6 @@ def plot_ci_levels(ci_df, S0_cases, R):
             ax.set_xscale('log')
             ax.set_yscale('log')
 
-            # Annotate ratio at largest N
             if len(sub) > 0:
                 last = sub.iloc[-1]
                 ax.annotate(f'ratio @ N={int(last["N"]):,}: {last["Ratio"]:.2f}',

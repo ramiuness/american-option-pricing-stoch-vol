@@ -44,6 +44,12 @@ S0, K_STRIKE, T = 100.0, 100.0, 1.0
 N_DEFAULT, M_DEFAULT, P_DEFAULT, K_RK4 = 10_000, 52, 513, 256
 SEED = 42
 
+# theta-driver used by every simulate_prices call in this module.
+# 'bm'  matches the LLH formula's PDE derivation (priceModels default)
+#       and the constant used in generate_plots.py.
+# 'gbm' matches the paper's original simulation.
+THETA_DRIVER = 'bm'
+
 
 def _savefig(fig, name):
     """Save figure to the output directory and close it."""
@@ -59,7 +65,8 @@ def _time_stages(n_paths, n_steps_mc, n_phi, n_steps_rk4, seed=SEED):
 
     # 1. Simulation
     t0 = time.perf_counter()
-    sim = model.simulate_prices(S0=S0, T=T, n_steps_mc=n_steps_mc, n_paths=n_paths)
+    sim = model.simulate_prices(S0=S0, T=T, n_steps_mc=n_steps_mc, n_paths=n_paths,
+                                theta_driver=THETA_DRIVER)
     t_sim = time.perf_counter() - t0
 
     # 2. Shared European precomputation (ODE + European prices)
@@ -96,7 +103,8 @@ def _time_stages(n_paths, n_steps_mc, n_phi, n_steps_rk4, seed=SEED):
 def _time_method(method, n_paths, n_steps_mc, seed=SEED, **kw):
     """Time a single pricing method end-to-end (sim + precomp + pricer)."""
     model = pm.ImprovedSteinStein(**PARAMS, seed=seed)
-    sim = model.simulate_prices(S0=S0, T=T, n_steps_mc=n_steps_mc, n_paths=n_paths)
+    sim = model.simulate_prices(S0=S0, T=T, n_steps_mc=n_steps_mc, n_paths=n_paths,
+                                theta_driver=THETA_DRIVER)
     ode_kw = dict(phi_max=300.0, n_phi=P_DEFAULT, n_steps_rk4=K_RK4)
 
     t0 = time.perf_counter()
@@ -123,42 +131,37 @@ def plot_timing_breakdown():
     """Single-panel figure: stage breakdown horizontal bar chart."""
     s = _time_stages(N_DEFAULT, M_DEFAULT, P_DEFAULT, K_RK4)
 
-    fig, ax = plt.subplots(figsize=(8, 4.5))
+    fig, ax = plt.subplots(figsize=(8, 3.5))
 
     labels = [
         'Simulation',
         'European precomp\n(shared)',
-        '',  # gap
         'Plain LSM\nBackward loop',
         'CV-LLH\nBackward loop',
     ]
     sizes = [
         s['Simulation'], s['Precompute'],
-        0,
         s['Plain_backward'], s['LLH_backward'],
     ]
-    colors = ['#1f77b4', '#ff7f0e',
-              'white',
-              '#d62728', '#d62728']
+    colors = ['#1f77b4', '#ff7f0e', '#d62728', '#d62728']
 
-    y = np.array([0, 1, 2, 3, 4], dtype=float)
+    y = np.arange(4, dtype=float)
     bars = ax.barh(y, sizes, color=colors, alpha=0.85, height=0.5)
 
     max_val = max(sizes)
     for bar, val in zip(bars, sizes):
-        if val > 0:
-            ax.text(bar.get_width() + max_val * 0.01,
-                    bar.get_y() + bar.get_height() / 2,
-                    f'{val:.2f}s', va='center', fontsize=9)
+        ax.text(bar.get_width() + max_val * 0.01,
+                bar.get_y() + bar.get_height() / 2,
+                f'{val:.2f}s', va='center', fontsize=9)
 
-    ax.set_yticks([i for i in range(5) if i != 2])
-    ax.set_yticklabels([l for l in labels if l])
-    ax.set_xlabel('Wall time (s)')
+    ax.set_yticks(np.arange(4))
+    ax.set_yticklabels(labels)
+    ax.set_xlabel('Computational time (s)')
     ax.set_xlim(0, max_val * 1.3)
     ax.invert_yaxis()
 
     fig.suptitle(
-        f'Wall-time breakdown: Plain LSM vs LSM+CV-LLH\n'
+        f'Computational cost breakdown: Plain LSM vs LSM+CV-LLH\n'
         f'$N={N_DEFAULT:,}$, $M={M_DEFAULT}$, $P={P_DEFAULT}$',
         fontsize=13, y=1.02)
     fig.tight_layout()
@@ -175,35 +178,30 @@ def plot_timing_combined():
     labels = [
         'Simulation',
         'European precomp\n(shared)',
-        '',  # gap
         'Plain LSM\nBackward loop',
         'CV-LLH\nBackward loop',
     ]
     sizes = [
         s['Simulation'], s['Precompute'],
-        0,
         s['Plain_backward'], s['LLH_backward'],
     ]
-    colors = ['#1f77b4', '#ff7f0e',
-              'white',
-              '#d62728', '#d62728']
+    colors = ['#1f77b4', '#ff7f0e', '#d62728', '#d62728']
 
-    y = np.array([0, 1, 2, 3, 4], dtype=float)
+    y = np.arange(4, dtype=float)
     bars = ax1.barh(y, sizes, color=colors, alpha=0.85, height=0.5)
 
     max_val = max(sizes)
     for bar, val in zip(bars, sizes):
-        if val > 0:
-            ax1.text(bar.get_width() + max_val * 0.01,
-                     bar.get_y() + bar.get_height() / 2,
-                     f'{val:.2f}s', va='center', fontsize=9)
+        ax1.text(bar.get_width() + max_val * 0.01,
+                 bar.get_y() + bar.get_height() / 2,
+                 f'{val:.2f}s', va='center', fontsize=9)
 
-    ax1.set_yticks([i for i in range(5) if i != 2])
-    ax1.set_yticklabels([l for l in labels if l])
-    ax1.set_xlabel('Wall time (s)')
+    ax1.set_yticks(np.arange(4))
+    ax1.set_yticklabels(labels)
+    ax1.set_xlabel('Computational time (s)')
     ax1.set_xlim(0, max_val * 1.3)
     ax1.invert_yaxis()
-    ax1.set_title('Wall-time breakdown')
+    ax1.set_title('Computational cost breakdown')
 
     # --- Right panel: cost-precision scatter ---
     methods = [('plain', 'Plain LSM', N_DEFAULT),
@@ -227,7 +225,7 @@ def plot_timing_combined():
 
     ax2.set_xscale('log')
     ax2.set_yscale('log')
-    ax2.set_xlabel('Wall time (s)')
+    ax2.set_xlabel('Computational time (s)')
     ax2.set_ylabel('Standard error')
     ax2.set_title('Cost--precision tradeoff')
     ax2.legend(fontsize=10)
@@ -256,9 +254,9 @@ def _scaling_plot(param_name, param_sym, values, fixed_label,
     fig, ax = plt.subplots(figsize=(7, 5))
     ax.plot(values, times, f'{marker}-', color=color)
     ax.set_xlabel(param_sym)
-    ax.set_ylabel('Wall time (s)')
+    ax.set_ylabel('Computational time (s)')
     fig.suptitle(
-        f'LSM+CV-LLH scaling with {param_sym}\n{fixed_label}',
+        f'LSM+CV-LLH computational scaling with {param_sym}\n{fixed_label}',
         fontsize=13, y=1.02)
     fig.tight_layout()
     _savefig(fig, fname)
@@ -322,8 +320,8 @@ def plot_scaling_all():
         ax.set_xlabel(sym)
         ax.set_title(fixed, fontsize=10)
 
-    axes[0].set_ylabel('Wall time (s)')
-    fig.suptitle('LSM+CV-LLH wall-time scaling', fontsize=13, y=1.02)
+    axes[0].set_ylabel('Computational time (s)')
+    fig.suptitle('LSM+CV-LLH computational scaling', fontsize=13, y=1.02)
     fig.tight_layout()
     _savefig(fig, 'fig_scaling_all.png')
 
