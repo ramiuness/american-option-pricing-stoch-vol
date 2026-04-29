@@ -31,7 +31,7 @@ d\theta_t       &= \lambda dt + \eta dW_t,
 \end{aligned}
 $$
 
-with $\langle W^1, W^2\rangle_t = \rho t$ and $W_t$ independent of $(W^1_t, W^2_t)$. The $\theta_t$ process drives a stochastic long-run mean for $\sigma_t$, making this a two-factor stochastic-volatility model. The model nests:
+with $\langle W^1, W^2\rangle_t = \rho t$ and $W_t$ independent of $(W^1_t, W^2_t)$. The $\theta_t$ process drives a stochastic long-run mean for $\sigma_t$. The model nests:
 
 - **Black-Scholes** when $\kappa = \nu = \lambda = \eta = \rho = 0$
 - **Stein-Stein (1991)** when $\lambda = \eta = \rho = 0$
