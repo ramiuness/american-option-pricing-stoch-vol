@@ -2,9 +2,8 @@
 
 Pricing American put options via Longstaff-Schwartz Monte Carlo (LSM) with Rasmussen control variates, under the Lin, Lin & He (2024) three-factor Stein-Stein stochastic volatility model.
 
-**Author:** Rami Younes
-**Supervisor:** Prof. Fabian Bastin, Universite de Montreal
-
+**Author:** Rami Younes, Universite de Montreal
+ 
 ---
 
 ## Overview
