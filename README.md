@@ -1,10 +1,9 @@
 # American Option Pricing under the LLH Stochastic Volatility Model
 
-Pricing American put options via Longstaff-Schwartz Monte Carlo (LSM) with Rasmussen control variates, under the Lin, Lin & He (2024) three-factor stochastic volatility model.
+Pricing American put options via Longstaff-Schwartz Monte Carlo (LSM) with Rasmussen-style control variates. The underlying process is governed by a three-factor stochastic volatility model introduced by Lin, Lin & He (2024). The model depends on 5 parameters, thus accomodating of richer dynamics and captures effects such as volatitlity clustering and the leverage effect.
 
 **Author:** Rami Younes, Universite de Montreal
- 
----
+ ---
 
 ## Overview
 
@@ -12,7 +11,7 @@ American options are widely traded yet their valuation remains the subject of ex
 
 Under Black-Scholes, Rasmussen-style control variates built from European option prices yield significant accuracy gains for LSM, even outperforming neural-network approaches (Chavez Aquino et al. 2022). This pattern presupposes a closed-form European price — available for Black-Scholes, Stein-Stein (1991), and Schöbel-Zhu (1999) but not for richer stochastic-volatility models.
 
-Lin, Lin & He (2024) proposed a stochastic-volatility model that nests all three and derived a *semi-analytical* European price via the Heston-PDE / Fourier-inversion / ODE-numerics technique — reportedly faster than Monte Carlo. This makes the LLH formula a natural drop-in for Rasmussen's control-variate framework.
+Lin, Lin & He (2024) proposed a stochastic-volatility model that nests all three and derived a *semi-analytical* European price via the Heston-PDE / Fourier-inversion / ODE-numerics technique — reportedly faster than Monte Carlo. This makes the LLH formula a natural drop-in for Rasmussen's control-variate framework. 
 
 This repository replicates the European-pricing experiments of Lin, Lin & He, and then estimates American put prices under the same dynamics by combining LSM with Rasmussen control variates, following Rasmussen (2005) and West (2013). The pipeline is computationally feasible and highly effective for variance reduction despite the semi-analytical European pricing; accuracy and stability are reached at lower path counts, in agreement with Rasmussen (2005).
 
@@ -30,7 +29,11 @@ d\theta_t       &= \lambda dt + \eta dW_t,
 \end{aligned}
 $$
 
-with $\langle W^1, W^2\rangle_t = \rho t$ and $W_t$ independent of $(W^1_t, W^2_t)$. The $\theta_t$ process drives a stochastic long-run mean for $\sigma_t$. The model nests:
+with $\langle W^1, W^2\rangle_t = \rho t$ and $W_t$ independent of $(W^1_t, W^2_t)$. The unobserved paramters are 
+
+$$\Theta = (\kappa, \nu, \lambda, \eta, \rho, \sigma_0, \theta_0).$$
+
+The $\theta_t$ process drives a stochastic long-run mean for $\sigma_t$. The model nests:
 
 - **Black-Scholes** when $\kappa = \nu = \lambda = \eta = \rho = 0$
 - **Stein-Stein (1991)** when $\lambda = \eta = \rho = 0$
@@ -43,7 +46,10 @@ Reference parameter sets from Lin, Lin & He (2024):
 | Table 1 | 0.01 | 5 | 0.2 | 0.9 | 0.01 | -0.2 | 0.15 | 0.18 |
 | Table 2 | 0.01 | 4.9394 | 0.3943 | 0.3115 | 0.4112 | 0.1691 | 0.2924 | 0.1319 |
 
-Full mathematical derivation, discretization, and proofs are in `reports/american_pricing_report.pdf`.
+Full mathematical derivation, discretization, and proofs are in `reports/full-report.pdf`.
+
+**Note:** In their paper, Lin, Lin & He (2024) state that $\theta_t$ is driven by geometric Brownian motion. However, after careful analysis, it turns that in the derivation of their European pricing formula, the actual assumption is that $\theta_t$ is driven by a Standard Brownian motion. A further mathematical proof against a geometric Brownian driver of $\that_t$ can be found in `reports/llh-formula.pdf`.
+
 
 ---
 
@@ -61,8 +67,7 @@ src/
 notebooks/
   european_pricing.ipynb     # European price validation: LLH formula vs MC; edge-case BS/SS/SZ recovery
   american_pricing.ipynb     # American put: plain LSM vs CV-BS vs CV-LLH; BS-limit validation
-  char_func_symbolic.ipynb   # SymPy proof: LLH ansatz non-closure (degree-4 argument)
-
+  
 reports/
   american_pricing_report.pdf  # Project report (LSM + CV results, VR, EEP)
   llh-formula-report.pdf       # Extended European-pricing report
@@ -86,7 +91,7 @@ The European call price follows the Fourier-inversion formula:
 
 $$ C = S_t P_1 - K e^{-r\tau} P_2 $$
 
-where $P_1, P_2$ are recovered from the characteristic functions $f_1, f_2$ obtained by solving an autonomous Riccati ODE system (RK4 integration) and inverting via trapezoid quadrature. European put prices follow by put-call parity.
+where $P_1, P_2$ are recovered from the characteristic functions $f_1, f_2$ obtained by solving an ODE system (RK4 integration) and applying Fourier invertsion via trapezoid quadrature. European put prices follow by put-call parity.
 
 ### American Put Price (LSM + CV)
 
@@ -95,7 +100,7 @@ The Longstaff-Schwartz algorithm estimates continuation values at each exercise 
 **1. Regression basis** (`basis_type`, `basis_vars`)
 - `basis_type='laguerre'` — Laguerre polynomials of order `basis_order` (default 2 → 3 functions).
 - `basis_type='gaussian'` — Gaussian RBFs at `basis_order` quantile-grid centres (default 5), median-spacing bandwidth, recomputed per time step.
-- `basis_vars` — single-variable `('S',)` (default; bitwise-identical to legacy spot-only) or multivariate `('S','sigma','theta')` (per-variable Laguerre/RBF blocks concatenated; duplicate $L_0$ columns dropped after the first block for Laguerre).
+- `basis_vars` — single-variable `('S',)` (default: spot-only) or multivariate `('S','sigma','theta')`.
 
 **2. Control variate** (`use_cv=True`)
 Rasmussen control variate using the closed-form LLH European put. 
@@ -164,7 +169,7 @@ cv    = ap.price_american_put_lsm_llh(model, sim, K=100.0, use_cv=True,  precomp
 
 ## Regenerating Report Figures
 
-The figures in `figs/` already exist on disk and ship with the repository. From the project root:
+From the project root:
 
 ```bash
 python scripts/regen_report_figs.py --out-dir /path/to/your/report/figs
@@ -181,6 +186,8 @@ Available flags:
 - `--skip-timing` — run only `generate_plots.py`.
 
 Runtime: ~30 min for `generate_plots.py`, ~5-8 min for `timing_analysis.py`.
+
+**Note:** The figures in `figs/` already exist on disk and ship with the repository.
 
 ---
 
