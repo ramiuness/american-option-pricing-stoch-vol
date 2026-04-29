@@ -1,6 +1,6 @@
 # American Option Pricing under the LLH Stochastic Volatility Model
 
-Pricing American put options via Longstaff-Schwartz Monte Carlo (LSM) with Rasmussen control variates, under the Lin, Lin & He (2024) three-factor Stein-Stein stochastic volatility model.
+Pricing American put options via Longstaff-Schwartz Monte Carlo (LSM) with Rasmussen control variates, under the Lin, Lin & He (2024) three-factor stochastic volatility model.
 
 **Author:** Rami Younes, Universite de Montreal
  
