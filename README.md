@@ -1,6 +1,6 @@
 # American Option Pricing under the LLH Stochastic Volatility Model
 
-Pricing American put options via Longstaff-Schwartz Monte Carlo (LSM) with Rasmussen control variates, under the Lin, Lin & He (2024) two-factor Stein-Stein stochastic volatility model.
+Pricing American put options via Longstaff-Schwartz Monte Carlo (LSM) with Rasmussen control variates, under the Lin, Lin & He (2024) three-factor Stein-Stein stochastic volatility model.
 
 **Author:** Rami Younes
 **Supervisor:** Prof. Fabian Bastin, Universite de Montreal
@@ -9,7 +9,7 @@ Pricing American put options via Longstaff-Schwartz Monte Carlo (LSM) with Rasmu
 
 ## Overview
 
-American options are widely traded yet their valuation remains a long-studied hard problem. Among the available numerical methods, least-squares Monte Carlo (LSM, Longstaff & Schwartz 2001) remains one of the most competitive — particularly when combined with variance reduction.
+American options are widely traded yet their valuation remains the subject of extensive academic research. Among the available numerical methods, least-squares Monte Carlo (LSM, Longstaff & Schwartz 2001) continues to stand as one of the most competitive — particularly when combined with variance reduction.
 
 Under Black-Scholes, Rasmussen-style control variates built from European option prices yield significant accuracy gains for LSM, even outperforming neural-network approaches (Chavez Aquino et al. 2022). This pattern presupposes a closed-form European price — available for Black-Scholes, Stein-Stein (1991), and Schöbel-Zhu (1999) but not for richer stochastic-volatility models.
 
@@ -25,13 +25,13 @@ The LLH model specifies the following risk-neutral dynamics:
 
 $$
 \begin{aligned}
-\frac{dS_t}{S_t} &= r\,dt + \sigma_t\,dW^1_t, \\
-d\sigma_t       &= \kappa(\theta_t - \sigma_t)\,dt + \nu\,dW^2_t, \\
-d\theta_t       &= \lambda\,dt + \eta\,dW_t,
+\frac{dS_t}{S_t} &= r dt + \sigma_t dW^1_t, \\
+d\sigma_t       &= \kappa(\theta_t - \sigma_t) dt + \nu dW^2_t, \\
+d\theta_t       &= \lambda dt + \eta dW_t,
 \end{aligned}
 $$
 
-with $\langle W^1, W^2\rangle_t = \rho\,t$ and $W_t$ independent of $(W^1_t, W^2_t)$. The $\theta_t$ process drives a stochastic long-run mean for $\sigma_t$, making this a two-factor stochastic-volatility model. The model nests:
+with $\langle W^1, W^2\rangle_t = \rho t$ and $W_t$ independent of $(W^1_t, W^2_t)$. The $\theta_t$ process drives a stochastic long-run mean for $\sigma_t$, making this a two-factor stochastic-volatility model. The model nests:
 
 - **Black-Scholes** when $\kappa = \nu = \lambda = \eta = \rho = 0$
 - **Stein-Stein (1991)** when $\lambda = \eta = \rho = 0$
@@ -85,13 +85,13 @@ figs/                    # 96 PNGs produced by generate_plots.py and timing_anal
 
 The European call price follows the Fourier-inversion formula:
 
-$$ C = S_t\,P_1 - K\,e^{-r\tau}\,P_2 $$
+$$ C = S_t P_1 - K e^{-r\tau} P_2 $$
 
 where $P_1, P_2$ are recovered from the characteristic functions $f_1, f_2$ obtained by solving an autonomous Riccati ODE system (RK4 integration) and inverting via trapezoid quadrature. European put prices follow by put-call parity.
 
 ### American Put Price (LSM + CV)
 
-The Longstaff-Schwartz algorithm estimates continuation values at each exercise date by ridge regression on a basis of the current state. The pipeline exposes three orthogonal axes:
+The Longstaff-Schwartz algorithm estimates continuation values at each exercise date by ridge regression on a basis of the current state. 
 
 **1. Regression basis** (`basis_type`, `basis_vars`)
 - `basis_type='laguerre'` — Laguerre polynomials of order `basis_order` (default 2 → 3 functions).
@@ -99,10 +99,10 @@ The Longstaff-Schwartz algorithm estimates continuation values at each exercise 
 - `basis_vars` — single-variable `('S',)` (default; bitwise-identical to legacy spot-only) or multivariate `('S','sigma','theta')` (per-variable Laguerre/RBF blocks concatenated; duplicate $L_0$ columns dropped after the first block for Laguerre).
 
 **2. Control variate** (`use_cv=True`)
-Rasmussen control variate using the closed-form LLH European put. The "improved" estimator returns $\hat V_{\text{imp}} = \overline{CF_1} - \hat\theta\,(\overline{CV_1} - E_0)$, where $\hat\theta$ is the global regression slope of $CF_1$ on $CV_1$.
+Rasmussen control variate using the closed-form LLH European put. 
 
 **3. Exercise floor** (`floor_method` / `euro_method`)
-The exercise rule enforces $I_j > \max(E_j, \cdot)$ where $E_j$ is the European value used as a floor. Three options:
+Three options:
 - `'llh'` — exact LLH European put via ODE/quadrature (slow; the canonical choice when CV is on).
 - `'bs'` — Black-Scholes evaluated at instantaneous simulated vol (fast proxy).
 - `'mc1'` — single-path discounted terminal payoff (cheapest; surprisingly competitive).
@@ -165,7 +165,7 @@ cv    = ap.price_american_put_lsm_llh(model, sim, K=100.0, use_cv=True,  precomp
 
 ## Regenerating Report Figures
 
-The figures in `figs/` already exist on disk and ship with the repository — rerunning the pipeline is only necessary when the source code changes. From the project root:
+The figures in `figs/` already exist on disk and ship with the repository. From the project root:
 
 ```bash
 python scripts/regen_report_figs.py --out-dir /path/to/your/report/figs
@@ -182,11 +182,6 @@ Available flags:
 - `--skip-timing` — run only `generate_plots.py`.
 
 Runtime: ~30 min for `generate_plots.py`, ~5-8 min for `timing_analysis.py`.
-
-**Static figures the script does NOT regenerate** (authored outside the codebase — keep them in your report directory):
-
-- `udem_logo.png`
-- `fig_paths_table1.png`, `fig_paths_table2.png`
 
 ---
 
