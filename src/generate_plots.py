@@ -408,7 +408,7 @@ def plot_sz_vs_llh(pset_name, label,
 # ═══════════════════════════════════════════════════════════════════════
 
 def plot_llh_vs_sz_lambda(pset_name, label,
-                          lam_values=np.arange(-1.0, 1.2, 0.2),
+                          lam_values=np.arange(-0.2, 0.51, 0.1),
                           S0=100.0, K=100.0,
                           tau=TAU,
                           phi_max=300.0, n_phi=513, n_steps_ode=128):
@@ -452,7 +452,7 @@ def plot_llh_vs_sz_lambda(pset_name, label,
 # ═══════════════════════════════════════════════════════════════════════
 
 def plot_llh_lambda_eta_layers(pset_name, label,
-                               lam_values=np.arange(-1.0, 1.2, 0.2),
+                               lam_values=np.arange(-0.2, 0.51, 0.1),
                                eta_values=(0.1, 0.25, 0.5),
                                S0=100.0, K=100.0,
                                tau=TAU,
@@ -515,6 +515,10 @@ def _llh_ode_kw():
 # Basis configs: (basis_type, basis_order, ridge, label)
 BASIS_LAGUERRE = ('laguerre', None, AM_RIDGE, 'Laguerre')
 BASIS_GAUSSIAN = ('gaussian', 10, AM_RIDGE, 'Gaussian')
+
+# Cross-pset accumulator: stashed during _run_param_set, consumed by main()
+# to produce the combined fig8_eep.png after all param sets have run.
+_EEP_ROWS_BY_PSET: dict = {}
 
 
 def _compute_american_grid(pset_name, basis_type='laguerre', basis_order=None,
@@ -633,7 +637,7 @@ def plot_american_put_panels(pset_name, label, horizon_key,
 
 def plot_american_put_panels_floors(pset_name, label, horizon_key,
                                     S0_values=(85.0, 90.0, 100.0, 110.0, 115.0),
-                                    K_values=(80.0, 120.0),
+                                    K_values=(100.0,),
                                     n_paths=10_000, seed=42):
     """
     Two-panel figure comparing exercise floor methods across moneyness.
@@ -679,7 +683,7 @@ def plot_american_put_panels_floors(pset_name, label, horizon_key,
             }
 
     n_panels = len(K_values)
-    fig, axes = plt.subplots(1, n_panels, figsize=(14, 5), sharey=False)
+    fig, axes = plt.subplots(1, n_panels, figsize=(7 * n_panels, 5), sharey=False)
     if n_panels == 1:
         axes = [axes]
 
@@ -705,7 +709,7 @@ def plot_american_put_panels_floors(pset_name, label, horizon_key,
 
         ax.set_xlabel('$S_0$')
         ax.set_title(_k_panel_label(K, S0_values, option_type='put'))
-        ax.legend(fontsize=7)
+        ax.legend(fontsize=9)
 
         if i == 0:
             ax.set_ylabel('Put price')
@@ -945,14 +949,21 @@ def plot_vr_mc1_comparison(pset_name, label, seed=42):
 # Plot 6: American Put Prices vs Spot (K=100, both horizons)
 # ═══════════════════════════════════════════════════════════════════════
 
-def plot_american_prices_vs_spot(pset_name, label, am_grid, basis_label=''):
+def plot_american_prices_vs_spot(pset_name, label,
+                                  am_grid_laguerre, am_grid_gaussian):
     """
-    1×2 figure (1-month, 1-year): MC Put, Plain LSM, CV-LLH vs S0 at K=100.
+    1×2 figure (1-year horizon) comparing regression bases:
+    left panel Laguerre, right panel Gaussian RBF. Each panel shows
+    MC Put, Plain LSM, CV-LLH vs S0 at K=100.
     """
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharey=False)
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharey=True)
 
-    for ax, (hkey, rows) in zip(axes, am_grid.items()):
-        hlbl = HORIZON_CONFIGS[hkey]['label']
+    panels = [
+        (axes[0], am_grid_laguerre['1y'], 'Laguerre basis'),
+        (axes[1], am_grid_gaussian['1y'], 'Gaussian RBF basis'),
+    ]
+
+    for ax, rows, title in panels:
         s0 = [r['S0'] for r in rows]
         ax.plot(s0, [r['MC_put_price'] for r in rows],
                 's--', color='#2ca02c', label='Euro Put (MC)')
@@ -963,17 +974,15 @@ def plot_american_prices_vs_spot(pset_name, label, am_grid, basis_label=''):
                     yerr=[1.96 * r['LLH_se'] for r in rows],
                     fmt='^-', color='#d62728', capsize=4, label='LSM + CV-LLH')
         ax.set_xlabel('$S_0$')
-        ax.set_title(hlbl)
+        ax.set_title(title)
         ax.legend(fontsize=9)
 
     axes[0].set_ylabel('Put price')
-    basis_suffix = f', {basis_label} basis' if basis_label else ''
     fig.suptitle(
-        f'American put prices vs spot ($K = {AM_K:.0f}$)\n{label} params{basis_suffix}',
+        f'American put prices vs spot ($K = {AM_K:.0f}$, 1-year)\n{label} params',
         fontsize=13, y=1.03)
     fig.tight_layout()
-    btag = f'_{basis_label.lower()}' if basis_label else ''
-    fname = f'fig6_american_prices_{pset_name}{btag}.png'
+    fname = f'fig6_american_prices_{pset_name}.png'
     _savefig(fig, fname)
     print(f"  Saved {fname}")
 
@@ -984,21 +993,21 @@ def plot_american_prices_vs_spot(pset_name, label, am_grid, basis_label=''):
 
 def plot_vr_ratios(pset_name, label, am_grid):
     """
-    1×2 figure by horizon: CV-LLH variance reduction ratio vs S0.
+    Single-panel figure (1-year horizon): CV-LLH variance reduction ratio vs S0.
     """
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharey=True)
+    fig, ax = plt.subplots(1, 1, figsize=(7, 5))
 
-    for ax, (hkey, rows) in zip(axes, am_grid.items()):
-        hlbl = HORIZON_CONFIGS[hkey]['label']
-        s0 = [r['S0'] for r in rows]
-        vr = [r['LLH_VR'] for r in rows]
-        ax.plot(s0, vr, 'o-', color='#d62728', label='CV-LLH')
-        ax.axhline(1, color='gray', ls='--', lw=0.8, alpha=0.6)
-        ax.set_xlabel('$S_0$')
-        ax.set_title(f'{hlbl} horizon')
-        ax.legend(fontsize=9)
+    rows = am_grid['1y']
+    hlbl = HORIZON_CONFIGS['1y']['label']
+    s0 = [r['S0'] for r in rows]
+    vr = [r['LLH_VR'] for r in rows]
+    ax.plot(s0, vr, 'o-', color='#d62728', label='CV-LLH')
+    ax.axhline(1, color='gray', ls='--', lw=0.8, alpha=0.6)
+    ax.set_xlabel('$S_0$')
+    ax.set_ylabel('VR Ratio')
+    ax.set_title(f'{hlbl} horizon')
+    ax.legend(fontsize=9)
 
-    axes[0].set_ylabel('VR Ratio')
     fig.suptitle(
         f'Variance reduction ratio ($K = {AM_K:.0f}$)\n{label} params',
         fontsize=13, y=1.03)
@@ -1043,14 +1052,24 @@ def plot_price_shift(pset_name, label, am_grid):
 # Plot 8: Early Exercise Premium
 # ═══════════════════════════════════════════════════════════════════════
 
-def plot_eep(pset_name, label, am_grid):
-    """
-    1×2 figure (1-month, 1-year): EEP (%) vs S0 for Plain LSM and CV-LLH.
-    """
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharey=True)
+def plot_eep(am_grids_by_pset, labels_by_pset, horizon_key='1y'):
+    """1xN figure (one panel per param set, single horizon): EEP (%) vs S0
+    for Plain LSM and CV-LLH, side by side.
 
-    for ax, (hkey, rows) in zip(axes, am_grid.items()):
-        hlbl = HORIZON_CONFIGS[hkey]['label']
+    am_grids_by_pset : {'T1': am_grid, 'T2': am_grid}; am_grid keyed by horizon.
+    labels_by_pset   : PARAM_LABELS-shaped dict (e.g. {'T1': 'Table 1', ...}).
+    """
+    n_panels = len(am_grids_by_pset)
+    fig, axes = plt.subplots(1, n_panels, figsize=(7 * n_panels, 5), sharey=True)
+    if n_panels == 1:
+        axes = [axes]
+
+    panels = [
+        (ax, am_grids_by_pset[name][horizon_key], labels_by_pset.get(name, name))
+        for ax, name in zip(axes, am_grids_by_pset.keys())
+    ]
+
+    for ax, rows, title in panels:
         s0 = [r['S0'] for r in rows]
         eep_plain = [(r['Plain_price'] - r['MC_put_price']) / r['MC_put_price'] * 100
                      if r['MC_put_price'] > 0.01 else np.nan for r in rows]
@@ -1060,15 +1079,16 @@ def plot_eep(pset_name, label, am_grid):
         ax.plot(s0, eep_llh, '^-', color='#d62728', label='CV-LLH')
         ax.axhline(0, color='gray', ls='--', lw=0.8, alpha=0.6)
         ax.set_xlabel('$S_0$')
-        ax.set_title(f'{hlbl} horizon')
+        ax.set_title(title)
         ax.legend(fontsize=9)
 
     axes[0].set_ylabel('EEP (%)')
+    hlbl = HORIZON_CONFIGS[horizon_key]['label']
     fig.suptitle(
-        f'Early exercise premium ($K = {AM_K:.0f}$)\n{label} params',
+        f'Early exercise premium ($K = {AM_K:.0f}$, {hlbl} horizon)',
         fontsize=13, y=1.03)
     fig.tight_layout()
-    fname = f'fig8_eep_{pset_name}.png'
+    fname = 'fig8_eep.png'
     _savefig(fig, fname)
     print(f"  Saved {fname}")
 
@@ -1264,28 +1284,36 @@ def _run_param_set(pset_name):
         print(f"  Plot 5: American put panels ({hlbl})...")
         plot_american_put_panels(pset_name, label, hkey)
 
-    # Report-only additions (T1 only)
-    if pset_name == 'T1':
-        print("  Plot 5-floors: American put panels with floor variants (1-year)...")
-        plot_american_put_panels_floors(pset_name, label, '1y')
-        gc.collect()
+    print("  Plot 5-floors: American put panels with floor variants (1-year)...")
+    plot_american_put_panels_floors(pset_name, label, '1y')
+    gc.collect()
 
+    if pset_name == 'T1':
         print("  Plot fig_estimator_scatter: estimator scatter at S0=100...")
         plot_estimator_scatter(pset_name, label)
         gc.collect()
 
-    # Dual basis: Laguerre and Gaussian fig6
-    am_grid_laguerre = None
-    for btype, border, ridge, blabel in [BASIS_LAGUERRE, BASIS_GAUSSIAN]:
-        print(f"  Computing American grid ({blabel})...")
-        am_grid = _compute_american_grid(pset_name, basis_type=btype,
-                                          basis_order=border, ridge=ridge)
-        if btype == 'laguerre':
-            am_grid_laguerre = am_grid
-        gc.collect()
+    # Dual basis: compute both grids, then produce a single combined fig6
+    print(f"  Computing American grid (Laguerre)...")
+    am_grid_laguerre = _compute_american_grid(
+        pset_name,
+        basis_type=BASIS_LAGUERRE[0], basis_order=BASIS_LAGUERRE[1],
+        ridge=BASIS_LAGUERRE[2])
+    gc.collect()
 
-        print(f"  Plot 6: American prices vs spot ({blabel})...")
-        plot_american_prices_vs_spot(pset_name, label, am_grid, basis_label=blabel)
+    print(f"  Computing American grid (Gaussian)...")
+    am_grid_gaussian = _compute_american_grid(
+        pset_name,
+        basis_type=BASIS_GAUSSIAN[0], basis_order=BASIS_GAUSSIAN[1],
+        ridge=BASIS_GAUSSIAN[2])
+    gc.collect()
+
+    print("  Plot 6: American prices vs spot (Laguerre vs Gaussian RBF, 1-year)...")
+    plot_american_prices_vs_spot(pset_name, label,
+                                  am_grid_laguerre, am_grid_gaussian)
+
+    del am_grid_gaussian
+    gc.collect()
 
     # Reuse Laguerre grid for VR/EEP/price-shift plots
     print("  Plot 7: Variance reduction ratios...")
@@ -1294,8 +1322,8 @@ def _run_param_set(pset_name):
     print("  Plot 7b: Price shift...")
     plot_price_shift(pset_name, label, am_grid_laguerre)
 
-    print("  Plot 8: Early exercise premium...")
-    plot_eep(pset_name, label, am_grid_laguerre)
+    # Stash 1-year rows for the combined fig8 EEP plot finalised in main().
+    _EEP_ROWS_BY_PSET[pset_name] = {'1y': list(am_grid_laguerre['1y'])}
 
     del am_grid_laguerre
     gc.collect()
@@ -1328,6 +1356,12 @@ def main():
 
     for name in requested:
         _run_param_set(name)
+        gc.collect()
+
+    if _EEP_ROWS_BY_PSET:
+        print("\n  Plot 8: Early exercise premium (combined, 1-year)...")
+        plot_eep(_EEP_ROWS_BY_PSET, PARAM_LABELS)
+        _EEP_ROWS_BY_PSET.clear()
         gc.collect()
 
     print("\n  Plot 9: BS-limit American put...")

@@ -52,17 +52,7 @@ def _build_design_matrix(Sj, volj, thetaj, K, itm,
                          basis_type, basis_order, basis_vars=('S',)):
     """Additive multivariate regression basis over (S/K, sigma, theta).
 
-    Concatenates one univariate block per entry of ``basis_vars``. When
-    ``len(basis_vars) == 1`` the helper emits exactly the matrix produced
-    by the single-variable inline code path (bitwise back-compat).
-
-    Multi-block Laguerre drops the duplicate ``L_0 = 1`` column of every
-    block after the first (first block keeps all ``basis_order+1``
-    columns; subsequent blocks keep only ``L_1..L_order``). Sigma and
-    theta are standardized per step against their ITM-sample mean/std so
-    Laguerre sees O(1) inputs. Gaussian RBF has no constant column, so
-    no dedup is applied; each block gets its own ITM-fit centres and
-    bandwidth in the variable's native scale.
+    Sigma and theta are standardized per step against their ITM-sample mean/std. 
 
     Parameters
     ----------

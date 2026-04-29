@@ -220,9 +220,14 @@ def american_put_comparison(model, K, S0_grid, moneyness_labels, T, n_steps_mc,
     """
     Price American puts across moneyness levels.
 
-    When include_llh=True (default), two methods are compared: Plain LSM
-    and CV-LLH.  When include_llh=False, only Plain LSM is computed
-    (no LLH ODE solver is invoked).
+    When include_llh=True (default), the CV leg uses the LLH semi-analytical
+    European put (``euro_method='llh'``) — appropriate under full LLH dynamics.
+    When include_llh=False, the CV leg uses the closed-form Black-Scholes put
+    (``euro_method='bs'``) — appropriate in the BS limit where the LLH formula
+    collapses to BS, so CV-BS is exact and avoids the ODE/quadrature cost.
+
+    The CV columns are named ``LLH_*`` in both modes for backwards compatibility;
+    they hold whichever CV variant was computed.
 
     Returns a DataFrame with columns for each method's price, SE, CI width,
     variance reduction ratio (VR), and MC European put price.
@@ -246,19 +251,24 @@ def american_put_comparison(model, K, S0_grid, moneyness_labels, T, n_steps_mc,
         row['Plain_se'] = res_plain['std_err']
         row['Plain_ci_w'] = res_plain['ci_95'][1] - res_plain['ci_95'][0]
 
+        # --- CV leg (LLH or BS depending on include_llh) ---
         if include_llh:
-            # --- Separate simulation for CV-LLH (n_paths_llh) ---
             m2 = pm.ImprovedSteinStein(**_model_attrs(model), seed=seed)
-            sim_llh = m2.simulate_prices(S0=s0, T=T, n_steps_mc=n_steps_mc, n_paths=n_paths_llh, scheme=scheme)
+            sim_cv = m2.simulate_prices(S0=s0, T=T, n_steps_mc=n_steps_mc,
+                                        n_paths=n_paths_llh, scheme=scheme)
+            cv_kwargs = dict(euro_method='llh', **(llh_params or {}))
+        else:
+            m2 = m
+            sim_cv = sim
+            cv_kwargs = dict(euro_method='bs', floor_method='bs')
 
-            # CV-LLH
-            res_llh = m2.price_american_put(sim_llh, K=K, use_cv=True, euro_method='llh',
-                                            ridge=1e-5, **llh_params)
-            row['LLH_price'] = res_llh.get('price_imp', res_llh['price'])
-            row['LLH_se'] = res_llh.get('std_err_imp', res_llh['std_err'])
-            ci_llh = res_llh.get('ci_95_imp', res_llh['ci_95'])
-            row['LLH_ci_w'] = ci_llh[1] - ci_llh[0]
-            row['LLH_VR'] = res_llh.get('vr', np.nan)
+        res_cv = m2.price_american_put(sim_cv, K=K, use_cv=True,
+                                       ridge=1e-5, **cv_kwargs)
+        row['LLH_price'] = res_cv.get('price_imp', res_cv['price'])
+        row['LLH_se'] = res_cv.get('std_err_imp', res_cv['std_err'])
+        ci_cv = res_cv.get('ci_95_imp', res_cv['ci_95'])
+        row['LLH_ci_w'] = ci_cv[1] - ci_cv[0]
+        row['LLH_VR'] = res_cv.get('vr', np.nan)
 
         rows.append(row)
 
@@ -327,14 +337,16 @@ def plot_vr_bars(vr_df, moneyness_labels):
     plt.show()
 
 
-def plot_american_put_prices(df, title=''):
+def plot_american_put_prices(df, title='', cv_method='llh'):
     """
-    Line chart: MC Put, Plain LSM, and CV-LLH American put price vs S0.
+    Line chart: MC Put, Plain LSM, and CV American put price vs S0.
 
     Parameters
     ----------
     df         : raw DataFrame from american_put_comparison()
     title      : figure title string
+    cv_method  : {'llh', 'bs'} — only controls the CV-leg legend label.
+                 Use 'bs' for the BS-limit panel where the CV leg is CV-BS.
     """
     s0 = df['S0'].values
 
@@ -343,8 +355,10 @@ def plot_american_put_prices(df, title=''):
     ax.plot(s0, df['MC_put_price'], 's--', color='#2ca02c', label='Euro Put (MC)')
     ax.errorbar(s0, df['Plain_price'], yerr=1.96 * df['Plain_se'],
                 fmt='o-', color='#1f77b4', capsize=4, label='Plain LSM')
-    ax.errorbar(s0, df['LLH_price'], yerr=1.96 * df['LLH_se'],
-                fmt='^-', color='#d62728', capsize=4, label='LSM + CV-LLH')
+    if 'LLH_price' in df.columns:
+        cv_label = f'LSM + CV-{cv_method.upper()}'
+        ax.errorbar(s0, df['LLH_price'], yerr=1.96 * df['LLH_se'],
+                    fmt='^-', color='#d62728', capsize=4, label=cv_label)
 
     ax.set_xlabel('$S_0$')
     ax.set_ylabel('Put price')
