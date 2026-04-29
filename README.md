@@ -1,8 +1,7 @@
 # American Option Pricing under the LLH Stochastic Volatility Model
 
-Pricing American put options via Longstaff-Schwartz Monte Carlo (LSM) with Rasmussen-style control variates. The underlying process is governed by a three-factor stochastic volatility model introduced by Lin, Lin & He (2024). The model depends on 5 parameters, thus accomodating of richer dynamics and captures effects such as volatitlity clustering and the leverage effect.
+Pricing American put options via Longstaff-Schwartz Monte Carlo (LSM) with Rasmussen-style control variates. The underlying process is governed by a three-factor stochastic volatility model introduced by Lin, Lin & He (2024). The model depends on 5 parameters allowing it to capture effects such as heavy tails, volatitlity clustering, and the leverage effect.
 
-**Author:** Rami Younes, Universite de Montreal
  ---
 
 ## Overview
@@ -29,7 +28,7 @@ d\theta_t       &= \lambda dt + \eta dW_t,
 \end{aligned}
 $$
 
-with $\langle W^1, W^2\rangle_t = \rho t$ and $W_t$ independent of $(W^1_t, W^2_t)$. The unobserved paramters are 
+with $\langle W^1, W^2\rangle_t = \rho t$ and $W_t$ independent of $(W^1_t, W^2_t)$. The unobserved parameters are 
 
 $$\Theta = (\kappa, \nu, \lambda, \eta, \rho, \sigma_0, \theta_0).$$
 
@@ -48,7 +47,7 @@ Reference parameter sets from Lin, Lin & He (2024):
 
 Full mathematical derivation, discretization, and proofs are in `reports/full-report.pdf`.
 
-**Note:** In their paper, Lin, Lin & He (2024) state that $\theta_t$ is driven by geometric Brownian motion. However, after careful analysis, it turns that in the derivation of their European pricing formula, the actual assumption is that $\theta_t$ is driven by a Standard Brownian motion. A further mathematical proof against a geometric Brownian driver of $\that_t$ can be found in `reports/llh-formula.pdf`.
+**Note:** In their paper, Lin, Lin & He (2024) state that $\theta_t$ is driven by geometric Brownian motion. However, after careful analysis, it turns that in the derivation of their European pricing formula, the actual assumption is that $\theta_t$ is driven by a Standard Brownian motion. A further mathematical proof against a geometric Brownian driver of $\theta_t$ can be found in `reports/llh-formula.pdf`.
 
 
 ---
@@ -69,9 +68,9 @@ notebooks/
   american_pricing.ipynb     # American put: plain LSM vs CV-BS vs CV-LLH; BS-limit validation
   
 reports/
-  american_pricing_report.pdf  # Project report (LSM + CV results, VR, EEP)
-  llh-formula-report.pdf       # Extended European-pricing report
-  pricing-project.pdf          # Project overview
+  full-report.pdf       # Project report (LSM + CV results, VR, EEP)
+  llh-formula.pdf       # Derive a pricing PDE using stoch cal machinery
+  
 
 scripts/
   regen_report_figs.py   # One-shot: re-run generate_plots.py and timing_analysis.py and copy report PNGs
@@ -213,3 +212,7 @@ Runtime: ~30 min for `generate_plots.py`, ~5-8 min for `timing_analysis.py`.
 - Schöbel & Zhu (1999). *Stochastic volatility with an Ornstein-Uhlenbeck process.* Review of Finance.
 - Stein & Stein (1991). *Stock price distributions with stochastic volatility.* RFS.
 - West (2013). *American Monte Carlo option pricing under pure jump Lévy models.* PhD thesis, Stellenbosch.
+
+
+
+**Author:** Rami Younes, Universit\'e de Montr\'eal
