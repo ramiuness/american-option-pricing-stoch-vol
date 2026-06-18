@@ -3,7 +3,7 @@ LLH (Lin-Lin-He 2024) improved Stein-Stein stochastic volatility model.
 
 Provides Monte Carlo simulation, closed-form European pricing via characteristic
 function / ODE integration, and Black-Scholes baselines.
-See reports/llh-formula_report.pdf for the theoretical derivation.
+See reports/llh-formula.pdf for the theoretical derivation.
 """
 
 from dataclasses import dataclass
@@ -60,8 +60,12 @@ def _milstein_step_inplace(S, sigma, theta, dW1_n, dW2_n, dW_n, xi_n, n, dt,
     """Advance 1D state (S, sigma, theta) by one Milstein step in place.
 
     ``xi_n`` carries a fair Bernoulli ±1 per path for the mixed-noise term.
-    Correlated-driver scheme: see ``eur_price_llh/milstein.tex``.
-    Ordering matches ``_euler_step_inplace``.
+    Correlated-driver scheme: see ``reports/full-report.pdf`` (Discretization
+    Schemes). This step uses the geometric-BM theta driver
+    (``dtheta = lam dt + Gamma dW``, ``Gamma = theta - theta0 + eta - lam*t``),
+    which is *not* the standard-BM increment baked into the LLH European
+    formula's PDE; the gbm driver induces a persistent model-mismatch bias
+    against that formula. Ordering matches ``_euler_step_inplace``.
     """
     sig = sigma
     th = theta
@@ -381,8 +385,14 @@ class ImprovedSteinStein:
             not needed. Not consumed by any downstream module.
         scheme : {'euler', 'milstein'}, default 'euler'
             Discretization of the LLH SDE system. See
-            ``eur_price_llh/generated_report/european_pricing_report.tex``
-            §Simulation/Discretization Schemes for the reference formulas.
+            ``reports/full-report.pdf`` (Simulation / Discretization Schemes)
+            for the reference formulas. ``'milstein'`` is available only with
+            the geometric-BM theta driver (``theta_driver='gbm'``): the gbm
+            theta-increments are required by the mixed-noise Milstein term, so
+            ``scheme='milstein'`` with ``theta_driver='bm'`` raises
+            ``ValueError``. The figures in the reports were produced with the
+            defaults, ``scheme='euler'`` and ``theta_driver='bm'`` (the
+            formula-aligned driver).
         theta_driver : {'bm', 'gbm'}, default 'bm'
             Diffusion form of the theta SDE. ``'bm'`` uses the standard
             Brownian driver ``dtheta = lam dt + eta dW`` -- this matches the
@@ -540,7 +550,7 @@ class ImprovedSteinStein:
                         + 0.5 * Gamma * (dW_n * dW_n - dt)
                     )
                 else:
-                    # Euler (original v1 path).
+                    # Euler.
                     Sv[:, n + 1] = Sv[:, n] * np.exp(
                         (r - 0.5 * sig_n * sig_n) * dt + sig_n * dW1_n
                     )

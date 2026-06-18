@@ -76,7 +76,6 @@ scripts/
   regen_report_figs.py   # One-shot: re-run generate_plots.py and timing_analysis.py and copy report PNGs
   report_figs.txt        # Whitelist of report-relevant PNG filenames
 
-tests/                   # Diagnostic scripts (indexing, bias, T2 discretization, regression). See tests/README.md
 figs/                    # 96 PNGs produced by generate_plots.py and timing_analysis.py
 ```
 
@@ -112,13 +111,13 @@ Three options:
 
 When `use_cv=True`, the floor uses `euro_method`. When `use_cv=False`, it uses `floor_method`.
 
-**Discretization.** Two SDE schemes are implemented: Euler (weak order 1, default) and Milstein (weak order 2). For Monte Carlo European pricing, `terminal_only=True` skips the path grid and returns only $S_T$.
+**Discretization.** Two SDE schemes are implemented: Euler (weak order 1, default) and Milstein (weak order 2). Milstein is available **only** with the geometric-BM theta driver (`theta_driver='gbm'`); pairing it with the default `theta_driver='bm'` raises `ValueError`. Because the gbm driver does not match the standard-BM increment assumed by the LLH European formula's PDE, all reported figures were produced with the defaults — `scheme='euler'` and `theta_driver='bm'` (the formula-aligned driver). For Monte Carlo European pricing, `terminal_only=True` skips the path grid and returns only $S_T$.
 
 ---
 
 ## Key Findings
 
-Headline results from `reports/american_pricing_report.pdf`:
+Headline results from `reports/full-report.pdf`:
 
 - **Plain LSM is unstable under full LLH dynamics** — remains noisy at 50,000 paths. **LSM+CV-LLH converges at ~5,000 paths**, in agreement with Rasmussen (2005).
 - **CV-LLH dominates plain LSM** and harvests **positive early-exercise premium** across the moneyness ladder under both reference parameter regimes.
@@ -194,7 +193,6 @@ Runtime: ~30 min for `generate_plots.py`, ~5-8 min for `timing_analysis.py`.
 
 - Python 3.10+
 - NumPy, SciPy, Matplotlib, Pandas
-- SymPy (for `char_func_symbolic.ipynb`)
 
 ---
 

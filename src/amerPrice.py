@@ -3,8 +3,8 @@ American put pricing via LSM with optional Rasmussen control variates.
 
 Implements Longstaff-Schwartz (2001) with the functional control-variate
 extension of Rasmussen (2005) under the Lin-Lin-He (2024) improved
-Stein-Stein stochastic volatility model. See american_pricing_report.pdf
-section 3.2.2 for the mathematical formulation.
+Stein-Stein stochastic volatility model. See reports/full-report.pdf
+for the mathematical formulation.
 """
 
 from dataclasses import dataclass
@@ -646,14 +646,14 @@ def price_american_put_lsm_llh(model, sim_out, K, basis_order=None,
     Parameters
     ----------
     model        : ImprovedSteinStein instance
-    sim_out      : dict from model.simulate_prices() — keys 'S', 'sigma_hat', 'B', 'dt'
+    sim_out      : dict from model.simulate_prices() — keys 'S', 'sigma_hat', 'theta', 'dt'
     K            : strike
     basis_order  : None (auto) or int. Default: Laguerre=2 (3 functions), Gaussian=5.
     use_cv       : if False, runs plain LSM with European exercise floor
     improved     : if True and use_cv=True, adds global CV estimator
     euro_method  : 'llh' | 'bs' | 'mc1' — European pricing for CV (only when use_cv=True)
     floor_method : 'bs' | 'llh' — European floor for exercise safety when use_cv=False.
-                   Default 'bs' is fast; 'llh' is accurate but ~100x slower.
+                   Default 'llh' is accurate but ~100x slower; 'bs' is a fast proxy.
     phi_max, n_phi, n_steps_rk4, eps0 : LLH quadrature params (only when euro_method='llh')
     basis_vars   : tuple, subset of ('S','sigma','theta'). Default ('S',)
                    matches the original spot-only basis bitwise. Multi-block

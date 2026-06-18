@@ -22,7 +22,7 @@ def _unpack_basis_cfg(cfg):
     """Accept 4-tuple (name, btype, border, ridge) or 5-tuple with basis_vars.
 
     Returns (name, basis_type, basis_order, ridge, basis_vars). Default
-    ``basis_vars=('S',)`` preserves the pre-v1 behavior.
+    ``basis_vars=('S',)`` preserves the original spot-only behavior.
     """
     if len(cfg) == 4:
         name, btype, border, ridge = cfg
@@ -345,7 +345,7 @@ def run_multi_basis(params, S0, K, T, n_steps_mc, N_paths, R,
     Parameters
     ----------
     basis_vars : tuple, subset of ('S','sigma','theta'). Default ('S',)
-                 preserves pre-v1 behavior.
+                 preserves the original spot-only behavior.
 
     Returns
     -------
